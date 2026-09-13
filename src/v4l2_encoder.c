@@ -712,6 +712,7 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
     };
     size_t expected_size;
     size_t packed_size;
+    size_t submitted_size;
     uint32_t stride;
     uint32_t scanlines;
     int index;
@@ -752,13 +753,17 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
         encoder->visible_height, &packed_size);
     if (status < 0)
         return status;
-    if (packed_size > UINT32_MAX)
+    submitted_size = encoder->output[index].length;
+    if (packed_size > submitted_size || submitted_size > UINT32_MAX)
         return -EOVERFLOW;
+    if (packed_size < submitted_size)
+        memset((uint8_t *)encoder->output[index].data + packed_size,
+               0, submitted_size - packed_size);
 
     buffer.index = (unsigned int)index;
     buffer.timestamp.tv_sec = (long)(tag / 1000000u);
     buffer.timestamp.tv_usec = (long)(tag % 1000000u);
-    planes[0].bytesused = (uint32_t)packed_size;
+    planes[0].bytesused = (uint32_t)submitted_size;
     planes[0].length = (uint32_t)encoder->output[index].length;
 
     if (xioctl(encoder->fd, VIDIOC_QBUF, &buffer) < 0) {
@@ -767,9 +772,9 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
         snprintf(
             encoder->last_operation,
             sizeof(encoder->last_operation),
-            "QBUF_OUT %ux%u stride=%u used=%zu len=%zu",
+            "QBUF_OUT %ux%u stride=%u payload=%zu used=%zu",
             encoder->visible_width, encoder->visible_height,
-            stride, packed_size, encoder->output[index].length);
+            stride, packed_size, submitted_size);
         return -saved_errno;
     }
 
