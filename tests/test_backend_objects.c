@@ -18,6 +18,16 @@ int main(void)
     struct VADriverVTable vtable;
     VAProfile profiles[3];
     VAEntrypoint entrypoints[2];
+    VAEncSequenceParameterBufferH264 sequence = {
+        .picture_width_in_mbs = 120,
+        .picture_height_in_mbs = 68,
+        .seq_fields.bits = {
+            .chroma_format_idc = 1,
+            .frame_mbs_only_flag = 1,
+        },
+        .frame_cropping_flag = 1,
+        .frame_crop_bottom_offset = 4,
+    };
     VAConfigAttrib config_attribute = {
         .type = VAConfigAttribRTFormat,
         .value = VA_RT_FORMAT_YUV420,
@@ -69,9 +79,17 @@ int main(void)
     VAImage derived;
     void *mapped;
     unsigned int num_surface_attributes = 0;
+    uint32_t encoded_width = 0;
+    uint32_t encoded_height = 0;
     int num_profiles = 0;
     int num_entrypoints = 0;
     size_t index;
+
+    assert(venus_encode_h264_dimensions(
+               &sequence, &encoded_width,
+               &encoded_height) == 0);
+    assert(encoded_width == 1920);
+    assert(encoded_height == 1080);
 
     memset(&context, 0, sizeof(context));
     memset(&vtable, 0, sizeof(vtable));

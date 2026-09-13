@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <va/va_backend.h>
+#include <va/va_enc_h264.h>
 
 #define VENUS_MAX_CONFIGS 16
 #define VENUS_MAX_CONTEXTS 8
@@ -82,6 +83,8 @@ struct venus_context {
     VAConfigID config_id;
     unsigned int width;
     unsigned int height;
+    unsigned int encode_width;
+    unsigned int encode_height;
     struct venus_backend *backend;
     struct venus_v4l2_decoder *decoder;
     struct venus_v4l2_encoder *encoder;
@@ -144,6 +147,9 @@ int venus_encode_queue_coded_buffer_locked(
 int venus_encode_store_packet_locked(
     struct venus_context *context,
     const struct venus_v4l2_packet *packet);
+int venus_encode_h264_dimensions(
+    const VAEncSequenceParameterBufferH264 *sequence,
+    uint32_t *width, uint32_t *height);
 VAStatus venus_encode_sync_surface_locked(
     struct venus_backend *backend, struct venus_surface *surface,
     int timeout_ms);

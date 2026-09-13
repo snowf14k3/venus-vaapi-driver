@@ -6,6 +6,7 @@
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <va/va_enc_h264.h>
@@ -184,6 +185,58 @@ static int collect_parameters(
     return 0;
 }
 
+int venus_encode_h264_dimensions(
+    const VAEncSequenceParameterBufferH264 *sequence,
+    uint32_t *width, uint32_t *height)
+{
+    uint32_t coded_width;
+    uint32_t coded_height;
+    uint32_t crop_width = 0;
+    uint32_t crop_height = 0;
+
+    if (!sequence || !width || !height ||
+        sequence->picture_width_in_mbs == 0 ||
+        sequence->picture_height_in_mbs == 0)
+        return -EINVAL;
+    if (sequence->seq_fields.bits.chroma_format_idc != 1 ||
+        !sequence->seq_fields.bits.frame_mbs_only_flag ||
+        sequence->bit_depth_luma_minus8 != 0 ||
+        sequence->bit_depth_chroma_minus8 != 0)
+        return -ENOTSUP;
+
+    coded_width =
+        (uint32_t)sequence->picture_width_in_mbs * 16u;
+    coded_height =
+        (uint32_t)sequence->picture_height_in_mbs * 16u;
+
+    if (sequence->frame_cropping_flag) {
+        uint64_t horizontal =
+            (uint64_t)sequence->frame_crop_left_offset +
+            sequence->frame_crop_right_offset;
+        uint64_t vertical =
+            (uint64_t)sequence->frame_crop_top_offset +
+            sequence->frame_crop_bottom_offset;
+
+        horizontal *= 2u;
+        vertical *= 2u;
+        if (horizontal >= coded_width ||
+            vertical >= coded_height)
+            return -EINVAL;
+        crop_width = (uint32_t)horizontal;
+        crop_height = (uint32_t)vertical;
+    }
+
+    *width = coded_width - crop_width;
+    *height = coded_height - crop_height;
+    if (*width < VENUS_MIN_WIDTH ||
+        *height < VENUS_MIN_HEIGHT ||
+        *width > VENUS_MAX_WIDTH ||
+        *height > VENUS_MAX_HEIGHT ||
+        (*width & 1u) || (*height & 1u))
+        return -EINVAL;
+    return 0;
+}
+
 static uint32_t profile_to_v4l2(VAProfile profile)
 {
     switch (profile) {
@@ -308,10 +361,20 @@ static int open_encoder(
     uint32_t profile = profile_to_v4l2(config->profile);
     uint32_t bitrate = parameters->bitrate;
     uint32_t frames_per_second = parameters->frames_per_second;
+    uint32_t encode_width;
+    uint32_t encode_height;
     uint32_t gop_size = 0;
     int status;
 
     if (!parameters->sequence || profile == UINT32_MAX)
+        return -EINVAL;
+
+    status = venus_encode_h264_dimensions(
+        parameters->sequence, &encode_width, &encode_height);
+    if (status < 0)
+        return status;
+    if ((encode_width + 15u) / 16u * 16u != context->width ||
+        (encode_height + 15u) / 16u * 16u != context->height)
         return -EINVAL;
 
     if (bitrate == 0)
@@ -330,11 +393,14 @@ static int open_encoder(
     if (gop_size == 0)
         gop_size = VENUS_ENCODE_DEFAULT_GOP;
 
+    context->encode_width = encode_width;
+    context->encode_height = encode_height;
+
     encoder_config = (struct venus_v4l2_encoder_config) {
         .device = backend->capabilities.encoder_path,
         .coded_format = V4L2_PIX_FMT_H264,
-        .width = context->width,
-        .height = context->height,
+        .width = encode_width,
+        .height = encode_height,
         .frames_per_second = frames_per_second,
         .bitrate = bitrate,
         .gop_size = gop_size,
@@ -359,10 +425,67 @@ static int open_encoder(
         backend,
         "encoder-open context=0x%x profile=%d size=%ux%u fps=%u bitrate=%u gop=%u output=%u capture=%u",
         context->id, config->profile,
-        context->width, context->height,
+        context->encode_width, context->encode_height,
         frames_per_second, bitrate, gop_size,
         venus_v4l2_encoder_output_count(context->encoder),
         venus_v4l2_encoder_capture_count(context->encoder));
+    return 0;
+}
+
+static int prepare_surface_frame(
+    const struct venus_surface *surface,
+    unsigned int width, unsigned int height,
+    const uint8_t **frame_data, uint8_t **allocated,
+    size_t *frame_size)
+{
+    size_t source_pixels;
+    size_t destination_pixels;
+    unsigned int row;
+
+    *frame_data = NULL;
+    *allocated = NULL;
+    *frame_size = 0;
+
+    if (!surface || width == 0 || height == 0 ||
+        width > surface->width || height > surface->height ||
+        surface->width > SIZE_MAX / surface->height ||
+        width > SIZE_MAX / height)
+        return -EINVAL;
+
+    source_pixels =
+        (size_t)surface->width * surface->height;
+    destination_pixels = (size_t)width * height;
+    if (surface->data_size <
+            source_pixels + source_pixels / 2 ||
+        destination_pixels > SIZE_MAX - destination_pixels / 2)
+        return -EINVAL;
+
+    *frame_size =
+        destination_pixels + destination_pixels / 2;
+    if (width == surface->width &&
+        height == surface->height) {
+        *frame_data = surface->data;
+        return 0;
+    }
+
+    *allocated = malloc(*frame_size);
+    if (!*allocated)
+        return -ENOMEM;
+
+    for (row = 0; row < height; row++)
+        memcpy(*allocated + (size_t)row * width,
+               surface->data +
+                   (size_t)row * surface->width,
+               width);
+
+    for (row = 0; row < height / 2; row++)
+        memcpy(*allocated + destination_pixels +
+                   (size_t)row * width,
+               surface->data + source_pixels +
+                   (size_t)row * surface->width,
+               width);
+
+    *frame_data = *allocated;
     return 0;
 }
 
@@ -373,6 +496,8 @@ VAStatus venus_encode_end_picture_locked(
     struct venus_h264_encode_parameters parameters;
     struct venus_buffer *coded;
     struct venus_surface *surface;
+    const uint8_t *frame_data;
+    uint8_t *allocated_frame;
     size_t coded_capacity;
     size_t expected_frame_size;
     uint64_t frame_tag;
@@ -399,23 +524,30 @@ VAStatus venus_encode_end_picture_locked(
     if (coded_capacity == 0 || coded_capacity > UINT32_MAX)
         return VA_STATUS_ERROR_INVALID_BUFFER;
 
-    if (context->width > SIZE_MAX / context->height)
-        return VA_STATUS_ERROR_INVALID_PARAMETER;
-    expected_frame_size =
-        (size_t)context->width * context->height;
-    if (expected_frame_size > SIZE_MAX / 3 * 2)
-        return VA_STATUS_ERROR_INVALID_PARAMETER;
-    expected_frame_size += expected_frame_size / 2;
-    if (surface->data_size < expected_frame_size)
-        return VA_STATUS_ERROR_INVALID_SURFACE;
-
     if (!context->encoder) {
         status = open_encoder(
             backend, context, config, &parameters,
             coded_capacity);
         if (status < 0)
             return venus_backend_encode_status_from_errno(status);
+    } else if (parameters.sequence) {
+        uint32_t width;
+        uint32_t height;
+
+        status = venus_encode_h264_dimensions(
+            parameters.sequence, &width, &height);
+        if (status < 0 ||
+            width != context->encode_width ||
+            height != context->encode_height)
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
+
+    status = prepare_surface_frame(
+        surface, context->encode_width,
+        context->encode_height, &frame_data,
+        &allocated_frame, &expected_frame_size);
+    if (status < 0)
+        return venus_backend_encode_status_from_errno(status);
 
     coded->coded_size = 0;
     coded->coded_ready = false;
@@ -426,8 +558,10 @@ VAStatus venus_encode_end_picture_locked(
 
     status = venus_encode_queue_coded_buffer_locked(
         context, coded->id);
-    if (status < 0)
+    if (status < 0) {
+        free(allocated_frame);
         return venus_backend_encode_status_from_errno(status);
+    }
 
     surface->encode_pending = true;
     surface->coded_buffer_id = coded->id;
@@ -438,9 +572,10 @@ VAStatus venus_encode_end_picture_locked(
     frame_tag = context->encode_sequence;
 
     status = venus_v4l2_encoder_submit(
-        context->encoder, surface->data,
+        context->encoder, frame_data,
         expected_frame_size, frame_tag,
         store_packet, context);
+    free(allocated_frame);
     if (status < 0) {
         rollback_coded_buffer(context, coded->id);
         surface->encode_pending = false;

@@ -109,6 +109,16 @@ This uploads 30 NV12 frames into VA surfaces, encodes them through
 `VAEntrypointEncSlice`, maps each `VACodedBufferSegment`, and requires
 software decoding to recover all 30 frames.
 
+Run the full resolution, round-trip and repeated-session matrix:
+
+```bash
+sudo ./tests/run-vaapi-h264-matrix.sh
+```
+
+The matrix covers 640x480, 720p, 1080p and a 300-frame 720p session. It
+compares software and VAAPI decoded frame hashes and verifies visible
+dimensions and kernel logs.
+
 Test driver loading after the first codec profile is implemented:
 
 ```bash
@@ -116,13 +126,14 @@ LIBVA_DRIVERS_PATH="$PWD/build" LIBVA_DRIVER_NAME=venus \
 vainfo --display drm --device /dev/dri/renderD128
 ```
 
-Install:
+Validate the complete H.264 matrix and install system-wide:
 
 ```bash
-sudo meson install -C build
+./scripts/validate-and-install.sh
 ```
 
-The default destination is `${libdir}/dri/venus_drv_video.so`.
+See [usage](docs/usage.md) for FFmpeg encode/decode commands and runtime
+environment setup.
 
 ## Design
 

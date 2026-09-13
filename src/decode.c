@@ -259,8 +259,13 @@ static VAStatus backend_begin_picture(VADriverContextP driver_context,
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_CONFIG;
     }
-    if (!surface || surface->width != context->width ||
-        surface->height != context->height) {
+    if (!surface ||
+        (config->entrypoint == VAEntrypointVLD &&
+         (surface->width != context->width ||
+          surface->height != context->height)) ||
+        (config->entrypoint == VAEntrypointEncSlice &&
+         (surface->width > context->width ||
+          surface->height > context->height))) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }

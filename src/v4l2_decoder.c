@@ -564,7 +564,9 @@ int venus_v4l2_decoder_pump(struct venus_v4l2_decoder *decoder,
         .events = POLLIN | POLLOUT | POLLPRI,
     };
 
-    status = poll(&poll_fd, 1, timeout_ms);
+    do {
+        status = poll(&poll_fd, 1, timeout_ms);
+    } while (status < 0 && errno == EINTR);
     if (status < 0)
         return decoder_error(decoder, "poll");
     if (status == 0)
