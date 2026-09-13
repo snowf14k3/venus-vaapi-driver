@@ -532,7 +532,9 @@ int venus_v4l2_encoder_pump(struct venus_v4l2_encoder *encoder,
         .fd = encoder->fd,
         .events = POLLIN | POLLOUT | POLLPRI,
     };
-    status = poll(&poll_fd, 1, timeout_ms);
+    do {
+        status = poll(&poll_fd, 1, timeout_ms);
+    } while (status < 0 && errno == EINTR);
     if (status < 0)
         return encoder_error(encoder, "poll");
     if (status == 0)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "backend.h"
+#include "backend_internal.h"
 #include "va_stubs.h"
 #include "venus/capabilities.h"
 
@@ -52,8 +53,18 @@ int main(void)
     VAConfigID config;
     VAConfigID encode_config;
     VAContextID encode_context;
-    VABufferID coded_buffer;
+    VABufferID coded_buffers[2];
     VACodedBufferSegment *coded_segment;
+    struct venus_backend *backend;
+    struct venus_context *internal_context;
+    struct venus_buffer *first_coded;
+    struct venus_buffer *second_coded;
+    const uint8_t first_packet_data[] = { 0x00, 0x00, 0x01, 0x65 };
+    const uint8_t second_packet_data[] = { 0x00, 0x00, 0x01, 0x41 };
+    struct venus_v4l2_packet packet = {
+        .data = first_packet_data,
+        .size = sizeof(first_packet_data),
+    };
     VAImage image;
     VAImage derived;
     void *mapped;
@@ -154,17 +165,58 @@ int main(void)
                surfaces, 2, &encode_context) == VA_STATUS_SUCCESS);
     assert(vtable.vaCreateBuffer(
                &context, encode_context, VAEncCodedBufferType,
-               4096, 1, NULL, &coded_buffer) == VA_STATUS_SUCCESS);
+               4096, 1, NULL, &coded_buffers[0]) == VA_STATUS_SUCCESS);
+    assert(vtable.vaCreateBuffer(
+               &context, encode_context, VAEncCodedBufferType,
+               4096, 1, NULL, &coded_buffers[1]) == VA_STATUS_SUCCESS);
     assert(vtable.vaMapBuffer(
-               &context, coded_buffer,
+               &context, coded_buffers[0],
                (void **)&coded_segment) == VA_STATUS_SUCCESS);
     assert(coded_segment->size == 0);
     assert(coded_segment->buf != NULL);
     assert(coded_segment->next == NULL);
     assert(vtable.vaUnmapBuffer(
-               &context, coded_buffer) == VA_STATUS_SUCCESS);
+               &context, coded_buffers[0]) == VA_STATUS_SUCCESS);
+
+    backend = context.pDriverData;
+    internal_context =
+        venus_backend_find_context(backend, encode_context);
+    first_coded =
+        venus_backend_find_buffer(backend, coded_buffers[0]);
+    second_coded =
+        venus_backend_find_buffer(backend, coded_buffers[1]);
+    assert(internal_context != NULL);
+    assert(first_coded != NULL);
+    assert(second_coded != NULL);
+    assert(venus_encode_queue_coded_buffer_locked(
+               internal_context, coded_buffers[0]) == 0);
+    assert(venus_encode_queue_coded_buffer_locked(
+               internal_context, coded_buffers[1]) == 0);
+
+    packet.tag = coded_buffers[1];
+    assert(venus_encode_store_packet_locked(
+               internal_context, &packet) == 0);
+    assert(first_coded->coded_ready);
+    assert(first_coded->coded_size == sizeof(first_packet_data));
+    assert(memcmp(first_coded->data, first_packet_data,
+                  sizeof(first_packet_data)) == 0);
+    assert(!second_coded->coded_ready);
+
+    packet.data = second_packet_data;
+    packet.size = sizeof(second_packet_data);
+    packet.tag = coded_buffers[0];
+    assert(venus_encode_store_packet_locked(
+               internal_context, &packet) == 0);
+    assert(second_coded->coded_ready);
+    assert(second_coded->coded_size == sizeof(second_packet_data));
+    assert(memcmp(second_coded->data, second_packet_data,
+                  sizeof(second_packet_data)) == 0);
+    assert(internal_context->encode_queue_count == 0);
+
     assert(vtable.vaDestroyBuffer(
-               &context, coded_buffer) == VA_STATUS_SUCCESS);
+               &context, coded_buffers[0]) == VA_STATUS_SUCCESS);
+    assert(vtable.vaDestroyBuffer(
+               &context, coded_buffers[1]) == VA_STATUS_SUCCESS);
     assert(vtable.vaDestroyContext(
                &context, encode_context) == VA_STATUS_SUCCESS);
     assert(vtable.vaDestroyConfig(

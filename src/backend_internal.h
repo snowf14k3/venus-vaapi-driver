@@ -82,12 +82,16 @@ struct venus_context {
     VAConfigID config_id;
     unsigned int width;
     unsigned int height;
+    struct venus_backend *backend;
     struct venus_v4l2_decoder *decoder;
     struct venus_v4l2_encoder *encoder;
     bool in_picture;
     VASurfaceID target;
     VABufferID pending[VENUS_MAX_PENDING_BUFFERS];
     size_t pending_count;
+    VABufferID encode_queue[VENUS_MAX_SURFACES];
+    size_t encode_queue_head;
+    size_t encode_queue_count;
 };
 
 struct venus_backend {
@@ -134,6 +138,11 @@ void venus_decode_destroy_all(struct venus_backend *backend);
 VAStatus venus_encode_end_picture_locked(
     struct venus_backend *backend, struct venus_context *context,
     const struct venus_config *config);
+int venus_encode_queue_coded_buffer_locked(
+    struct venus_context *context, VABufferID buffer_id);
+int venus_encode_store_packet_locked(
+    struct venus_context *context,
+    const struct venus_v4l2_packet *packet);
 VAStatus venus_encode_sync_surface_locked(
     struct venus_backend *backend, struct venus_surface *surface,
     int timeout_ms);

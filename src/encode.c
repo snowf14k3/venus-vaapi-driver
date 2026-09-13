@@ -198,19 +198,55 @@ static uint32_t profile_to_v4l2(VAProfile profile)
     }
 }
 
-static int store_packet(const struct venus_v4l2_packet *packet,
-                        void *opaque)
+int venus_encode_queue_coded_buffer_locked(
+    struct venus_context *context, VABufferID buffer_id)
 {
-    struct venus_backend *backend = opaque;
+    size_t tail;
+
+    if (context->encode_queue_count >= VENUS_MAX_SURFACES)
+        return -ENOSPC;
+
+    tail = (context->encode_queue_head +
+            context->encode_queue_count) %
+           VENUS_MAX_SURFACES;
+    context->encode_queue[tail] = buffer_id;
+    context->encode_queue_count++;
+    return 0;
+}
+
+static void rollback_coded_buffer(struct venus_context *context,
+                                  VABufferID buffer_id)
+{
+    size_t tail;
+
+    if (context->encode_queue_count == 0)
+        return;
+
+    tail = (context->encode_queue_head +
+            context->encode_queue_count - 1) %
+           VENUS_MAX_SURFACES;
+    if (context->encode_queue[tail] == buffer_id)
+        context->encode_queue_count--;
+}
+
+int venus_encode_store_packet_locked(
+    struct venus_context *context,
+    const struct venus_v4l2_packet *packet)
+{
+    struct venus_backend *backend;
     struct venus_buffer *buffer;
     struct venus_surface *surface;
+    VABufferID buffer_id;
     size_t capacity;
 
-    if (!packet || packet->tag > UINT32_MAX)
+    if (!packet || !context || !context->backend ||
+        context->encode_queue_count == 0)
         return -EINVAL;
 
-    buffer = venus_backend_find_buffer(
-        backend, (VABufferID)packet->tag);
+    backend = context->backend;
+    buffer_id =
+        context->encode_queue[context->encode_queue_head];
+    buffer = venus_backend_find_buffer(backend, buffer_id);
     if (!buffer || buffer->type != VAEncCodedBufferType)
         return -ENOENT;
 
@@ -234,6 +270,11 @@ static int store_packet(const struct venus_v4l2_packet *packet,
     buffer->coded_segment.next = NULL;
     buffer->coded_ready = true;
 
+    context->encode_queue_head =
+        (context->encode_queue_head + 1) %
+        VENUS_MAX_SURFACES;
+    context->encode_queue_count--;
+
     surface = venus_backend_find_surface(
         backend, buffer->source_surface_id);
     if (surface &&
@@ -242,10 +283,18 @@ static int store_packet(const struct venus_v4l2_packet *packet,
 
     venus_backend_log(
         backend,
-        "encoded buffer=0x%x surface=0x%x bytes=%zu flags=0x%x",
+        "encoded buffer=0x%x surface=0x%x bytes=%zu flags=0x%x driver-tag=0x%llx queued=%zu",
         buffer->id, buffer->source_surface_id,
-        buffer->coded_size, packet->flags);
+        buffer->coded_size, packet->flags,
+        (unsigned long long)packet->tag,
+        context->encode_queue_count);
     return 0;
+}
+
+static int store_packet(const struct venus_v4l2_packet *packet,
+                        void *opaque)
+{
+    return venus_encode_store_packet_locked(opaque, packet);
 }
 
 static int open_encoder(
@@ -374,14 +423,20 @@ VAStatus venus_encode_end_picture_locked(
            sizeof(coded->coded_segment));
     coded->coded_segment.buf = coded->data;
 
+    status = venus_encode_queue_coded_buffer_locked(
+        context, coded->id);
+    if (status < 0)
+        return venus_backend_encode_status_from_errno(status);
+
     surface->encode_pending = true;
     surface->coded_buffer_id = coded->id;
 
     status = venus_v4l2_encoder_submit(
         context->encoder, surface->data,
         expected_frame_size, coded->id,
-        store_packet, backend);
+        store_packet, context);
     if (status < 0) {
+        rollback_coded_buffer(context, coded->id);
         surface->encode_pending = false;
         venus_backend_log(
             backend,
@@ -431,7 +486,7 @@ VAStatus venus_encode_sync_buffer_locked(
         wait_ms = remaining > 1000 ? 1000 : (int)remaining;
         status = venus_v4l2_encoder_pump(
             context->encoder, wait_ms,
-            store_packet, backend, NULL);
+            store_packet, context, NULL);
         if (status == -ETIMEDOUT || status == -EAGAIN)
             continue;
         if (status < 0) {
@@ -479,4 +534,6 @@ void venus_encode_close_context(struct venus_context *context)
 
     venus_v4l2_encoder_close(context->encoder);
     context->encoder = NULL;
+    context->encode_queue_head = 0;
+    context->encode_queue_count = 0;
 }

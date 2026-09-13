@@ -167,6 +167,7 @@ static VAStatus backend_create_context(
         VENUS_CONTEXT_BASE | (unsigned int)(context - backend->contexts + 1);
     context->config_id = config_id;
     context->width = (unsigned int)picture_width;
+    context->backend = backend;
     context->height = (unsigned int)picture_height;
     context->target = VA_INVALID_ID;
 
