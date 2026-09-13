@@ -24,8 +24,8 @@ The comparison fixes the following source baselines:
   [`gstv4l2videoenc.c`](https://github.com/GStreamer/gstreamer/blob/1.26/subprojects/gst-plugins-good/sys/v4l2/gstv4l2videoenc.c),
   and
   [`gstv4l2object.c`](https://github.com/GStreamer/gstreamer/blob/1.26/subprojects/gst-plugins-good/sys/v4l2/gstv4l2object.c).
-- Raphael kernel patches 0010, 0027, 0028, 0029, 0032, 0041, and 0044
-  in `raphael-kernel-venus` commit `20fcbc8`.
+- Raphael kernel patches 0010, 0027, 0028, 0029, 0032, 0041, 0044 and
+  0046. Patch 0046 completes the IRIS1 CBR startup properties.
 - Xiaomi Android Q downstream commit
   `192eca8550f95c2eec58a474793d1d93fc1b3b67`.
 
@@ -47,10 +47,15 @@ The 0.5.1 driver reaches all VA capability and allocation gates:
 This failure position is the Venus `venc_start_streaming()` transaction. It
 is not a libva capability failure, a DMA-BUF export failure, an OUTPUT QBUF
 shape error, an EOS/drain failure, or a later encoded-packet routing failure.
+A direct FFmpeg V4L2 test subsequently failed at the same CAPTURE STREAMON for
+2340x1080 at both 30 and 60 fps, excluding GNOME, libva and frame rate as the
+source of that rejection. The earlier hardware matrix had passed the same
+native 30 fps geometry with H.264 High through the backend's CBR path; the
+rejected direct and GNOME paths both used the generic VBR contract.
 
 ## Full contract comparison
 
-| Contract | FFmpeg 7.1 | GStreamer 1.26 | Backend before 0.6.0 | 0.6.0 decision |
+| Contract | FFmpeg 7.1 | GStreamer 1.26 | Backend before 0.6.0 | 0.7.0 decision |
 | --- | --- | --- | --- | --- |
 | Raw/coded S_FMT | OUTPUT then CAPTURE | Negotiates both pools before streaming | OUTPUT then CAPTURE | Keep |
 | CAPTURE sizeimage | Compressed-frame heuristic, aligned to 4 KiB | Driver-negotiated pool size | VA coded-buffer capacity | Use FFmpeg heuristic; VA capacity remains independent |
@@ -60,7 +65,7 @@ shape error, an EOS/drain failure, or a later encoded-packet routing failure.
 | B frames | Set 0 before other encode controls | Encoder property | Set after GOP | Set 0 first |
 | Frame interval | Set after REQBUFS | Set during final object configuration | Set before REQBUFS | Set after REQBUFS |
 | Header mode | Explicit SEPARATE | Driver property negotiation | Kernel default JOINED_WITH_1ST_FRAME | Explicit SEPARATE |
-| Rate control | Frame RC enabled; kernel default VBR | Encoder property | CQP emulated as explicit VBR after 0.5.1 | Keep VBR and omit redundant mode ioctl |
+| Rate control | Frame RC enabled; kernel default VBR | Encoder property | CQP emulated as explicit VBR after 0.5.1 | Translate CQP to the hardware-validated CBR path backed by kernel patch 0046 |
 | Bitrate | Set before frame-RC enable | Encoder property | Set after frame-RC enable | Set before frame-RC enable |
 | GOP | Set after frame-RC enable | Encoder property | Set before B-frame reset | Set after B-frame reset |
 | H.264 profile | Set High | Negotiated codec profile | Set High | Keep |
@@ -94,11 +99,12 @@ client-visible destination capacity. Version 0.6.0 calculates the same
 compressed-frame request used by FFmpeg while retaining the larger VA coded
 buffer for safe packet copying.
 
-Raphael patch 0010 selects two VPP pipes for H.264 above the 720p30 CBR
-threshold. The Android Q downstream additionally configures VBV and low
-latency for high-load CBR. The backend therefore exposes CQP for GNOME but
-uses the ordinary VBR frame-RC path, rather than claiming native CQP or
-forcing the incomplete high-load CBR contract.
+Raphael patch 0010 selects the IRIS1 work route from codec, rate mode,
+slice mode and macroblocks per second. Android Q also selects work mode 1,
+programs a 500 or 1000 percent VBV HRD window, and enables low latency and
+bitrate savings for CBR. Kernel patch 0046 ports that complete CBR startup
+contract. The backend exposes the CQP capability required by GNOME and maps
+it to this hardware-validated CBR path.
 
 ## Rejected explanations
 
@@ -118,9 +124,10 @@ resolve the observed STREAMON failure by themselves:
 - changing only 2352x1088 to 2340x1080; this fixes visible geometry but does
   not repair session construction.
 
-## 0.6.0 implementation boundary
+## 0.7.0 implementation boundary
 
-Version 0.6.0 changes the session as one unit:
+Version 0.7.0 retains the complete 0.6.0 session lifecycle and changes the
+GNOME CQP compatibility mapping from VBR to the kernel-backed CBR contract:
 
 1. Set raw OUTPUT and coded CAPTURE formats.
 2. Request and map OUTPUT buffers.
@@ -132,8 +139,10 @@ Version 0.6.0 changes the session as one unit:
 8. STREAMON CAPTURE.
 9. Forward later IDR requests through FORCE_KEY_FRAME.
 
-It preserves 2340x1080 at 60 fps. It does not introduce a frame-rate cap,
-modify the kernel, or claim native constant-QP behavior.
+It preserves 2340x1080 at 60 fps and does not claim native constant-QP
+behavior. The companion kernel patch changes only IRIS1 H.264/HEVC CBR
+sessions; VBR, CQ, VP8 and other Venus generations retain their existing
+contracts.
 
 ## Validation boundary
 

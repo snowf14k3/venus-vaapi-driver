@@ -580,10 +580,10 @@ static int open_encoder(
 
     /*
      * IRIS1 rejects H.264 sessions with frame rate control disabled.
-     * Translate VA CQP to the VBR control path used by FFmpeg; high-load
-     * CBR additionally depends on downstream-only VBV/low-latency setup.
+     * Translate VA CQP to the validated CBR path.  The Raphael kernel
+     * supplies the matching IRIS1 VBV, low-latency and work-mode contract.
      */
-    bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR;
+    bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
 
     context->encode_width = encode_width;
     context->encode_height = encode_height;

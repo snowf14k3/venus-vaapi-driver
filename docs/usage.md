@@ -102,9 +102,9 @@ session messages together with the driver's `encoder-open` and
 
 - progressive H.264 8-bit encoding and decoding;
 - CBR encoding with no B frames; VA CQP requests are translated to the
-  resolution-aware VBR path used by FFmpeg because IRIS1 rejects
-  rate-control-off sessions and high-load CBR requires downstream-only
-  VBV/low-latency properties;
+  validated CBR path because IRIS1 rejects rate-control-off sessions. The
+  matching Raphael kernel provides the SM8150 VBV, low-latency and work-mode
+  properties required by the CBR firmware contract;
 - GNOME Remote Desktop uses `VENUS_VAAPI_NATIVE_MODE=1080x2340` to
   translate its macroblock-aligned surfaces back to the Raphael panel's
   visible dimensions in either orientation;
