@@ -142,6 +142,8 @@ int main(int argc, char **argv)
         .bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
         .h264_i_qp = 26,
         .h264_p_qp = 28,
+        .h264_min_qp = 1,
+        .h264_max_qp = 51,
         .gop_size = frames_per_second,
         .h264_profile = V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE,
         .h264_level = V4L2_MPEG_VIDEO_H264_LEVEL_4_1,

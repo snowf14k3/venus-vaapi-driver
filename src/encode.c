@@ -15,6 +15,7 @@
 #define VENUS_ENCODE_OUTPUT_BUFFERS 4u
 #define VENUS_ENCODE_CAPTURE_BUFFERS 16u
 #define VENUS_ENCODE_DEFAULT_BITRATE 1000000u
+#define VENUS_ENCODE_MAX_BITRATE 160000000u
 #define VENUS_ENCODE_DEFAULT_FPS 30u
 #define VENUS_ENCODE_DEFAULT_GOP 60u
 
@@ -310,6 +311,66 @@ int venus_encode_apply_native_mode(
     return 0;
 }
 
+int venus_encode_cqp_bitrate(
+    uint32_t width, uint32_t height, uint32_t frames_per_second,
+    uint32_t qp, uint32_t *bitrate)
+{
+    uint64_t pixels;
+    uint64_t samples_per_second;
+    uint64_t suggested;
+    uint32_t quality_weight;
+
+    if (!width || !height || !frames_per_second ||
+        qp < 1 || qp > 51 || !bitrate)
+        return -EINVAL;
+    if ((uint64_t)width > UINT64_MAX / height)
+        return -EOVERFLOW;
+    pixels = (uint64_t)width * height;
+    if (pixels > UINT64_MAX / frames_per_second)
+        return -EOVERFLOW;
+    samples_per_second = pixels * frames_per_second;
+    quality_weight = 52u - qp;
+    if (samples_per_second > UINT64_MAX / quality_weight)
+        return -EOVERFLOW;
+
+    /*
+     * IRIS1 cannot run H.264 with frame RC disabled, so VA CQP is carried
+     * through CBR.  Scale the compatibility bitrate with both pixel rate
+     * and requested QP.  QP 22 receives one third of a bit per pixel at
+     * full frame rate, which is suitable for detailed desktop content.
+     */
+    suggested =
+        samples_per_second * quality_weight / 90u;
+    if (suggested < VENUS_ENCODE_DEFAULT_BITRATE)
+        suggested = VENUS_ENCODE_DEFAULT_BITRATE;
+    if (suggested > VENUS_ENCODE_MAX_BITRATE)
+        suggested = VENUS_ENCODE_MAX_BITRATE;
+
+    *bitrate = (uint32_t)suggested;
+    return 0;
+}
+
+static int apply_cqp_bitrate_override(uint32_t *bitrate)
+{
+    const char *value = getenv("VENUS_VAAPI_CQP_BITRATE");
+    unsigned long long parsed;
+    char *end;
+
+    if (!value || !value[0])
+        return 0;
+
+    errno = 0;
+    end = NULL;
+    parsed = strtoull(value, &end, 10);
+    if (errno || end == value || *end != '\0' ||
+        parsed < 32000u ||
+        parsed > VENUS_ENCODE_MAX_BITRATE)
+        return -EINVAL;
+
+    *bitrate = (uint32_t)parsed;
+    return 0;
+}
+
 static uint32_t profile_to_v4l2(VAProfile profile)
 {
     switch (profile) {
@@ -563,10 +624,13 @@ static int open_encoder(
     uint32_t level;
     uint32_t bitrate = parameters->bitrate;
     bool bitrate_supplied;
+    bool cqp_compat;
     uint32_t frames_per_second = parameters->frames_per_second;
     uint32_t encode_width;
     uint32_t encode_height;
     uint32_t bitrate_mode;
+    uint32_t minimum_qp = 1;
+    uint32_t maximum_qp = 51;
     size_t v4l2_capture_size;
     int32_t qp;
     uint32_t gop_size = 0;
@@ -613,8 +677,6 @@ static int open_encoder(
     if (bitrate == 0)
         bitrate = parameters->sequence->bits_per_second;
     bitrate_supplied = bitrate != 0;
-    if (bitrate == 0)
-        bitrate = VENUS_ENCODE_DEFAULT_BITRATE;
 
     if (frames_per_second == 0 &&
         parameters->sequence->
@@ -633,17 +695,28 @@ static int open_encoder(
     if (frames_per_second == 0)
         frames_per_second = VENUS_ENCODE_DEFAULT_FPS;
 
-    if (config->rate_control == VA_RC_CQP &&
-        !bitrate_supplied) {
-        uint64_t suggested =
-            (uint64_t)encode_width * encode_height *
-            frames_per_second / 12u;
+    qp = (int32_t)parameters->picture->pic_init_qp +
+         parameters->slice_qp_delta;
+    if (qp < 1 || qp > 51)
+        return -EINVAL;
 
-        if (suggested < VENUS_ENCODE_DEFAULT_BITRATE)
-            suggested = VENUS_ENCODE_DEFAULT_BITRATE;
-        if (suggested > 120000000u)
-            suggested = 120000000u;
-        bitrate = (uint32_t)suggested;
+    cqp_compat = config->rate_control == VA_RC_CQP;
+    if (cqp_compat) {
+        minimum_qp = qp > 2 ? (uint32_t)qp - 2u : 1u;
+        maximum_qp = qp < 49 ? (uint32_t)qp + 2u : 51u;
+    }
+
+    if (cqp_compat && !bitrate_supplied) {
+        status = venus_encode_cqp_bitrate(
+            encode_width, encode_height, frames_per_second,
+            (uint32_t)qp, &bitrate);
+        if (status < 0)
+            return status;
+        status = apply_cqp_bitrate_override(&bitrate);
+        if (status < 0)
+            return status;
+    } else if (bitrate == 0) {
+        bitrate = VENUS_ENCODE_DEFAULT_BITRATE;
     }
     if (bitrate > INT_MAX)
         return -ERANGE;
@@ -659,11 +732,6 @@ static int open_encoder(
         gop_size = parameters->sequence->intra_period;
     if (gop_size == 0)
         gop_size = VENUS_ENCODE_DEFAULT_GOP;
-
-    qp = (int32_t)parameters->picture->pic_init_qp +
-         parameters->slice_qp_delta;
-    if (qp < 1 || qp > 51)
-        return -EINVAL;
 
     /*
      * IRIS1 rejects H.264 sessions with frame rate control disabled.
@@ -686,6 +754,8 @@ static int open_encoder(
         .bitrate_mode = bitrate_mode,
         .h264_i_qp = (uint32_t)qp,
         .h264_p_qp = (uint32_t)qp,
+        .h264_min_qp = minimum_qp,
+        .h264_max_qp = maximum_qp,
         .gop_size = gop_size,
         .h264_profile = profile,
         .h264_level = level,
@@ -715,12 +785,12 @@ static int open_encoder(
 
     venus_backend_log(
         backend,
-        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u(auto) size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u output=%u capture=%u",
+        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u(auto) size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d range=%u..%u gop=%u output=%u capture=%u",
         context->id, config->profile,
         parameters->sequence->level_idc, level,
         context->encode_width, context->encode_height,
         frames_per_second, config->rate_control,
-        bitrate, qp, gop_size,
+        bitrate, qp, minimum_qp, maximum_qp, gop_size,
         venus_v4l2_encoder_output_count(context->encoder),
         venus_v4l2_encoder_capture_count(context->encoder));
     return 0;

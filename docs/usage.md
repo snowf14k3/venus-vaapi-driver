@@ -104,8 +104,11 @@ new Venus session errors and a stopped RDP service.
 - progressive H.264 8-bit encoding and decoding;
 - CBR encoding with no B frames; VA CQP requests are translated to the
   validated CBR path because IRIS1 rejects rate-control-off sessions. The
-  matching Raphael kernel provides the SM8150 VBV, low-latency and work-mode
-  properties required by the CBR firmware contract;
+  requested QP sets the initial QP, a narrow QP range and a pixel-rate-scaled
+  compatibility bitrate. `VENUS_VAAPI_CQP_BITRATE` can override that bitrate
+  in bits per second from 32000 through 160000000;
+- the matching Raphael kernel provides the SM8150 VBV, low-latency and
+  work-mode properties required by the CBR firmware contract;
 - GNOME Remote Desktop uses `VENUS_VAAPI_NATIVE_MODE=1080x2340` to
   translate its macroblock-aligned surfaces back to the Raphael panel's
   visible dimensions in either orientation;

@@ -159,6 +159,19 @@ buffer when Venus returns KEYFRAME, PFRAME or BFRAME. Matching by timestamp
 also preserves the correct destination when CAPTURE completion order differs
 from VA submission order.
 
+## 0.9.0 CQP quality mapping
+
+GNOME supplies `bits_per_second=0` and requests QP 22. The initial CBR
+compatibility mapping used one twelfth of a bit per pixel at the full frame
+rate, producing 12,636,000 bit/s for 2340x1080 at 60 fps, while leaving the
+kernel's default initial QPs 26 and 28 and the full 1 through 51 QP range.
+That discarded the client's quality target and produced visible macroblocks.
+
+Version 0.9.0 programs the requested QP as both I- and P-frame initial QP,
+bounds CQP compatibility to QP plus or minus 2, and derives 50,544,000 bit/s
+for this QP 22 native session. The rate remains configurable through
+`VENUS_VAAPI_CQP_BITRATE` without changing GNOME or limiting frame rate.
+
 ## Validation boundary
 
 Host validation must include GCC and Clang builds, all Meson tests, diff

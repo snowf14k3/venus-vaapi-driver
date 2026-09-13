@@ -176,6 +176,9 @@ int venus_encode_apply_native_mode(
     const char *native_mode, uint32_t context_width,
     uint32_t context_height, uint32_t *width,
     uint32_t *height);
+int venus_encode_cqp_bitrate(
+    uint32_t width, uint32_t height, uint32_t frames_per_second,
+    uint32_t qp, uint32_t *bitrate);
 VAStatus venus_encode_sync_surface_locked(
     struct venus_backend *backend, struct venus_surface *surface,
     int timeout_ms);

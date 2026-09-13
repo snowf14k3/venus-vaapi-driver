@@ -21,6 +21,8 @@ struct venus_v4l2_encoder_config {
     uint32_t bitrate_mode;
     uint32_t h264_i_qp;
     uint32_t h264_p_qp;
+    uint32_t h264_min_qp;
+    uint32_t h264_max_qp;
     uint32_t gop_size;
     uint32_t h264_profile;
     uint32_t h264_level;

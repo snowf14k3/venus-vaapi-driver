@@ -218,20 +218,20 @@ static int set_parameters(
             "S_CTRL(BITRATE)");
         if (status < 0)
             return status;
-    } else {
-        status = set_control(
-            encoder, V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
-            (int32_t)config->h264_i_qp,
-            "S_CTRL(H264_I_FRAME_QP)");
-        if (status < 0)
-            return status;
-        status = set_control(
-            encoder, V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,
-            (int32_t)config->h264_p_qp,
-            "S_CTRL(H264_P_FRAME_QP)");
-        if (status < 0)
-            return status;
     }
+
+    status = set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
+        (int32_t)config->h264_i_qp,
+        "S_CTRL(H264_I_FRAME_QP)");
+    if (status < 0)
+        return status;
+    status = set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,
+        (int32_t)config->h264_p_qp,
+        "S_CTRL(H264_P_FRAME_QP)");
+    if (status < 0)
+        return status;
 
     status = set_control(
         encoder, V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
@@ -254,12 +254,14 @@ static int set_parameters(
 
     status = set_control(
         encoder, V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
-        1, "S_CTRL(H264_MIN_QP)");
+        (int32_t)config->h264_min_qp,
+        "S_CTRL(H264_MIN_QP)");
     if (status < 0)
         return status;
     status = set_control(
         encoder, V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
-        51, "S_CTRL(H264_MAX_QP)");
+        (int32_t)config->h264_max_qp,
+        "S_CTRL(H264_MAX_QP)");
     if (status < 0)
         return status;
 
@@ -473,10 +475,15 @@ int venus_v4l2_encoder_open(
                  V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ||
             config->bitrate == 0)
             return -EINVAL;
-    } else if (config->h264_i_qp < 1 ||
-               config->h264_i_qp > 51 ||
-               config->h264_p_qp < 1 ||
-               config->h264_p_qp > 51) {
+    }
+    if (config->h264_i_qp < 1 ||
+        config->h264_i_qp > 51 ||
+        config->h264_p_qp < 1 ||
+        config->h264_p_qp > 51 ||
+        config->h264_min_qp < 1 ||
+        config->h264_min_qp > 51 ||
+        config->h264_max_qp < config->h264_min_qp ||
+        config->h264_max_qp > 51) {
         return -EINVAL;
     }
 

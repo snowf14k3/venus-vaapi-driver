@@ -96,6 +96,7 @@ int main(void)
     unsigned int num_surface_attributes = 0;
     uint32_t encoded_width = 0;
     uint32_t encoded_height = 0;
+    uint32_t cqp_bitrate = 0;
     int num_profiles = 0;
     int num_entrypoints = 0;
     size_t index;
@@ -122,6 +123,18 @@ int main(void)
     assert(venus_encode_apply_native_mode(
                "invalid", 1088, 2352,
                &encoded_width, &encoded_height) == -EINVAL);
+
+    assert(venus_encode_cqp_bitrate(
+               2340, 1080, 60, 22, &cqp_bitrate) == 0);
+    assert(cqp_bitrate == 50544000);
+    assert(venus_encode_cqp_bitrate(
+               640, 480, 15, 51, &cqp_bitrate) == 0);
+    assert(cqp_bitrate == 1000000);
+    assert(venus_encode_cqp_bitrate(
+               UINT32_MAX, UINT32_MAX, UINT32_MAX, 1,
+               &cqp_bitrate) == -EOVERFLOW);
+    assert(venus_encode_cqp_bitrate(
+               2340, 1080, 60, 0, &cqp_bitrate) == -EINVAL);
 
     memset(&context, 0, sizeof(context));
     memset(&vtable, 0, sizeof(vtable));

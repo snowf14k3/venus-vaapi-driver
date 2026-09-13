@@ -47,7 +47,9 @@ if grep -q \
    grep -q \
        '\[HWAccel.VAAPI\] Created VAAPI encode session' \
        "${OUT}" &&
-   grep -q 'venus-vaapi: encoder-open' "${OUT}" &&
+   grep -Eq \
+       'venus-vaapi: encoder-open .*bitrate=[0-9]+ qp=22 range=20\.\.24' \
+       "${OUT}" &&
    [[ -n "${HEADER_TAG}" ]] &&
    grep -Fq \
        "driver-tag=${HEADER_TAG} complete=1" "${OUT}" &&
