@@ -5,6 +5,18 @@ capabilities_test = executable(
   dependencies: [threads_dep],
 )
 
+annexb_split_test = executable(
+  'test-annexb-split',
+  files('../src/annexb_split.c', 'test_annexb_split.c'),
+  include_directories: project_inc,
+)
+
+v4l2_decoder_test = executable(
+  'test-v4l2-decoder',
+  files('../src/v4l2_decoder.c', 'test_v4l2_decoder.c'),
+  include_directories: project_inc,
+)
+
 h264_annexb_test = executable(
   'test-h264-annexb',
   codec_sources + files('test_h264_annexb.c'),
@@ -27,6 +39,8 @@ driver_load_test = executable(
 )
 
 test('capabilities', capabilities_test)
+test('annexb-split', annexb_split_test)
+test('v4l2-decoder', v4l2_decoder_test)
 test('h264-annexb', h264_annexb_test)
 test('driver-init', driver_init_test)
 test('driver-load', driver_load_test, args: [venus_driver])

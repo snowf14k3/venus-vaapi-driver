@@ -72,6 +72,16 @@ parameters are translated to V4L2 controls before streaming.
 The first milestone intentionally prioritizes byte-correct H.264 decode over
 zero-copy presentation.
 
+## Stateful session validation
+
+`venus-v4l2-decode` keeps the V4L2 session independent from VA object code. It
+negotiates H.264 OUTPUT and linear NV12 CAPTURE, maps the actual buffer counts
+returned by `VIDIOC_REQBUFS`, queues every capture buffer, tracks source-change
+events, submits one Annex-B access unit per OUTPUT buffer, drains with
+`V4L2_DEC_CMD_STOP`, and writes dequeued frames in display order. The device
+test uses a progressive stream without B frames so queue correctness can be
+established before timestamp-to-surface reordering is introduced.
+
 ## H.264 bytestream reconstruction
 
 FFmpeg submits the original slice NAL bytes through `VASliceDataBufferType`,

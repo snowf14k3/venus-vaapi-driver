@@ -19,7 +19,10 @@ The repository currently provides:
 - host tests for the allowlist, no-device behavior, driver initialization and
   exported ABI symbol;
 - a bounded H.264 Annex-B assembler that reconstructs conservative SPS/PPS
-  NAL units and validates every VA slice range before copying it.
+  NAL units and validates every VA slice range before copying it;
+- an isolated V4L2 stateful decoder session and `venus-v4l2-decode` tool for
+  validating queue order, MMAP buffers, source-change events and drain before
+  the same code is connected to VA surfaces.
 
 Debian 13 ships libva 2.22. A driver built against libva 1.20 remains loadable
 because libva searches compatible lower minor-version init symbols.
@@ -57,6 +60,18 @@ Probe the live Venus nodes:
 ```bash
 ./build/venus-vaapi-info
 ```
+
+On a Raphael test device, validate the internal V4L2 session independently
+from VA-API:
+
+```bash
+sudo ./tests/run-v4l2-h264.sh
+```
+
+The script generates a progressive 640x480 H.264 stream with access-unit
+delimiters, decodes 30 frames through `venus-v4l2-decode`, compares the raw
+NV12 output with software decoding, and saves the complete userspace and
+kernel evidence under `/var/tmp`.
 
 Test driver loading after the first codec profile is implemented:
 

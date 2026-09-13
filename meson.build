@@ -33,6 +33,11 @@ codec_sources = files(
   'src/h264_annexb.c',
 )
 
+stateful_sources = files(
+  'src/annexb_split.c',
+  'src/v4l2_decoder.c',
+)
+
 driver_sources = common_sources + codec_sources + files(
   'src/driver.c',
   'src/va_stubs.c',
@@ -55,6 +60,14 @@ executable(
   include_directories: project_inc,
   dependencies: [threads_dep],
   install: true,
+)
+
+executable(
+  'venus-v4l2-decode',
+  common_sources + stateful_sources + files('tools/venus-v4l2-decode.c'),
+  include_directories: project_inc,
+  dependencies: [threads_dep],
+  install: false,
 )
 
 subdir('tests')
