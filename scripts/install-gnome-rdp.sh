@@ -61,9 +61,11 @@ fi
 
 echo "已安装驱动：${INSTALLED_DRIVER}"
 sha256sum "${BUILD}/venus_drv_video.so" "${INSTALLED_DRIVER}"
+INSTALLED_DRIVER_DIR="$(dirname -- "${INSTALLED_DRIVER}")"
 
 "${USER_SYSTEMCTL[@]}" set-environment \
     LIBVA_DRIVER_NAME=venus \
+    LIBVA_DRIVERS_PATH="${INSTALLED_DRIVER_DIR}" \
     VENUS_VAAPI_LOG=1 \
     G_MESSAGES_DEBUG=all \
     GNOME_REMOTE_DESKTOP_DEBUG=vkva-renderer,va-times
@@ -102,6 +104,7 @@ if [[ -z "${NEW_PID}" || "${NEW_PID}" == 0 ||
 fi
 
 echo "服务 PID：${OLD_PID:-unknown} -> ${NEW_PID}"
+echo "服务驱动目录：${INSTALLED_DRIVER_DIR}"
 
 echo "PASS：GNOME RDP VAAPI 合同通过，驱动已安装并重启 ${UNIT}"
 echo "现在重新建立 RDP 连接，然后运行 scripts/check-gnome-rdp.sh"
