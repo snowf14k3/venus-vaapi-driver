@@ -761,8 +761,17 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
     planes[0].bytesused = (uint32_t)packed_size;
     planes[0].length = (uint32_t)encoder->output[index].length;
 
-    if (xioctl(encoder->fd, VIDIOC_QBUF, &buffer) < 0)
-        return encoder_error(encoder, "VIDIOC_QBUF(OUTPUT)");
+    if (xioctl(encoder->fd, VIDIOC_QBUF, &buffer) < 0) {
+        int saved_errno = errno;
+
+        snprintf(
+            encoder->last_operation,
+            sizeof(encoder->last_operation),
+            "QBUF_OUT %ux%u stride=%u used=%zu len=%zu",
+            encoder->visible_width, encoder->visible_height,
+            stride, packed_size, encoder->output[index].length);
+        return -saved_errno;
+    }
 
     encoder->output[index].queued = true;
     return 0;

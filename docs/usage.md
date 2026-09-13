@@ -103,6 +103,7 @@ session messages together with the driver's `encoder-open` and
 - progressive H.264 8-bit encoding and decoding;
 - CBR encoding with no B frames; VA CQP requests are translated to a
   resolution-aware CBR target because IRIS1 rejects rate-control-off sessions;
+- encoder timing is currently capped at the validated 30 frames per second;
 - CPU-backed NV12 surfaces for ordinary VAAPI clients and linear DMA-BUF
   surfaces for GNOME's Vulkan renderer;
 - maximum advertised width and height of 4096, subject to the SM8150

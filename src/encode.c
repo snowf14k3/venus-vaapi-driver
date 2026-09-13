@@ -16,6 +16,7 @@
 #define VENUS_ENCODE_DEFAULT_BITRATE 1000000u
 #define VENUS_ENCODE_DEFAULT_FPS 30u
 #define VENUS_ENCODE_DEFAULT_GOP 60u
+#define VENUS_ENCODE_MAX_VALIDATED_FPS 30u
 
 struct venus_h264_encode_parameters {
     const VAEncSequenceParameterBufferH264 *sequence;
@@ -440,6 +441,7 @@ static int open_encoder(
     uint32_t bitrate = parameters->bitrate;
     bool bitrate_supplied;
     uint32_t frames_per_second = parameters->frames_per_second;
+    uint32_t requested_frames_per_second;
     uint32_t encode_width;
     uint32_t encode_height;
     uint32_t bitrate_mode;
@@ -491,6 +493,9 @@ static int open_encoder(
     }
     if (frames_per_second == 0)
         frames_per_second = VENUS_ENCODE_DEFAULT_FPS;
+    requested_frames_per_second = frames_per_second;
+    if (frames_per_second > VENUS_ENCODE_MAX_VALIDATED_FPS)
+        frames_per_second = VENUS_ENCODE_MAX_VALIDATED_FPS;
 
     if (config->rate_control == VA_RC_CQP &&
         !bitrate_supplied) {
@@ -517,9 +522,7 @@ static int open_encoder(
     if (gop_size == 0)
         gop_size = parameters->sequence->intra_period;
     if (gop_size == 0)
-        gop_size = config->rate_control == VA_RC_CQP
-                       ? 65535u
-                       : VENUS_ENCODE_DEFAULT_GOP;
+        gop_size = VENUS_ENCODE_DEFAULT_GOP;
 
     qp = (int32_t)parameters->picture->pic_init_qp +
          parameters->slice_qp_delta;
@@ -577,11 +580,12 @@ static int open_encoder(
 
     venus_backend_log(
         backend,
-        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u output=%u capture=%u",
+        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u size=%ux%u requested-fps=%u v4l2-fps=%u rc=0x%x bitrate=%u qp=%d gop=%u output=%u capture=%u",
         context->id, config->profile,
         parameters->sequence->level_idc, level,
         context->encode_width, context->encode_height,
-        frames_per_second, config->rate_control,
+        requested_frames_per_second, frames_per_second,
+        config->rate_control,
         bitrate, qp, gop_size,
         venus_v4l2_encoder_output_count(context->encoder),
         venus_v4l2_encoder_capture_count(context->encoder));
