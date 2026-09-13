@@ -5,8 +5,9 @@ initially targeting Xiaomi Redmi K20 Pro / Mi 9T Pro (Raphael, SM8150).
 
 ## Current status
 
-**H.264 VLD and EncSlice are validated for progressive 8-bit video at
-640x480. Other codecs remain disabled.**
+**H.264 High VLD and EncSlice are validated for progressive 8-bit video
+through Raphael's native 1080x2340 and 2340x1080 orientations. Other codecs
+remain disabled.**
 
 The repository currently provides:
 
@@ -36,7 +37,7 @@ because libva searches compatible lower minor-version init symbols.
 
 | Codec | Decode | Encode |
 | --- | --- | --- |
-| H.264 Baseline/Main/High | Baseline validated; Main/High pending | High EncSlice validated at 640x480 |
+| H.264 Baseline/Main/High | Baseline and High validated; Main pending | High validated through 1080x2340 |
 | HEVC Main 8-bit | planned | planned |
 | VP8 | planned | planned |
 | VP9 Profile 0 | planned | not exposed |

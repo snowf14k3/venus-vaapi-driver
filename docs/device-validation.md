@@ -66,5 +66,22 @@ Result:
 
 This validates CPU-backed NV12 upload, CBR parameter translation,
 `VAEncCodedBufferType`, `vaSyncBuffer` and FFmpeg's coded-buffer reuse.
-Higher resolutions, concurrent sessions and long-running encoding remain
-separate milestones.
+The extended resolution and duration checks are recorded below.
+
+## H.264 readiness matrix
+
+The complete pre-install matrix passed on Xiaomi Redmi K20 Pro / Mi 9T Pro
+(Raphael, SM8150):
+
+- 640x480 at 15 fps, 30 frames;
+- 1280x720 at 30 fps, 90 frames;
+- 1920x1080 at 30 fps, 60 frames;
+- native portrait 1080x2340 at 30 fps, 60 frames;
+- native landscape 2340x1080 at 30 fps, 60 frames;
+- 1280x720 at 30 fps, 300 frames.
+
+All six VAAPI H.264 encodes completed. Each stream reported the requested
+visible dimensions and frame count, and every VAAPI-decoded frame hash
+matched software decoding. The test interval contained no new Venus session
+error, IOMMU fault, Oops or panic. The installer then installed the validated
+driver system-wide.
