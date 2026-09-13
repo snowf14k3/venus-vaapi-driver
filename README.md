@@ -5,8 +5,8 @@ initially targeting Xiaomi Redmi K20 Pro / Mi 9T Pro (Raphael, SM8150).
 
 ## Current status
 
-**Bootstrap and capability-probe stage. No VA decode or encode profile is
-advertised yet.**
+**Experimental H.264 VLD integration. Encoding and the other decode profiles
+remain disabled.**
 
 The repository currently provides:
 
@@ -21,8 +21,9 @@ The repository currently provides:
 - a bounded H.264 Annex-B assembler that reconstructs conservative SPS/PPS
   NAL units and validates every VA slice range before copying it;
 - an isolated V4L2 stateful decoder session and `venus-v4l2-decode` tool for
-  validating queue order, MMAP buffers, source-change events and drain before
-  the same code is connected to VA surfaces.
+  validating queue order, MMAP buffers, source-change events and drain;
+- experimental H.264 Baseline/Main/High VLD config, context, buffer, surface,
+  sync and NV12 image-download paths backed by that same session.
 
 Debian 13 ships libva 2.22. A driver built against libva 1.20 remains loadable
 because libva searches compatible lower minor-version init symbols.
@@ -36,8 +37,9 @@ because libva searches compatible lower minor-version init symbols.
 | VP8 | planned | planned |
 | VP9 Profile 0 | planned | not exposed |
 
-The driver will not advertise a profile before its full submission path is
-implemented and validated on hardware.
+The `h264-vld` branch advertises H.264 for device validation. It will not be
+merged into `main` until the full VA submission path passes byte-exact hardware
+tests. Other profiles remain hidden.
 
 ## Build
 
@@ -72,6 +74,16 @@ The script generates a progressive 640x480 H.264 stream with access-unit
 delimiters, decodes 30 frames through `venus-v4l2-decode`, compares the raw
 NV12 output with software decoding, and saves the complete userspace and
 kernel evidence under `/var/tmp`.
+
+Validate the experimental VA-API path:
+
+```bash
+sudo ./tests/run-vaapi-h264.sh
+```
+
+This runs `vainfo`, decodes the same 30-frame stream through FFmpeg VA-API and
+`hwdownload`, compares every NV12 byte, and enables userspace backend tracing
+for the test only.
 
 Test driver loading after the first codec profile is implemented:
 

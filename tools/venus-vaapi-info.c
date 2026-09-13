@@ -25,7 +25,11 @@ int main(void)
     printf("decoder_codecs=%s\n", decode);
     printf("encoder=%s\n", caps.encoder_path[0] ? caps.encoder_path : "none");
     printf("encoder_codecs=%s\n", encode);
-    printf("vaapi_profiles=none (codec submission is not implemented yet)\n");
+    if (venus_capabilities_has(
+            &caps, VENUS_ROLE_DECODER, VENUS_CODEC_H264))
+        printf("vaapi_profiles=H.264 Baseline/Main/High VLD (experimental)\n");
+    else
+        printf("vaapi_profiles=none\n");
 
     return 0;
 }

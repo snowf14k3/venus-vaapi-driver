@@ -19,7 +19,7 @@ int main(void)
     assert(setenv("VENUS_VAAPI_ALLOW_NO_DEVICE", "1", 1) == 0);
     assert(venus_driver_init(&context) == VA_STATUS_SUCCESS);
     assert(context.pDriverData != NULL);
-    assert(context.max_profiles == 1);
+    assert(context.max_profiles == 3);
     assert(context.max_entrypoints == 1);
     assert(context.max_attributes == 4);
     assert(context.str_vendor != NULL);
@@ -69,7 +69,7 @@ int main(void)
     assert(num_profiles == 0);
     assert(vtable.vaCreateConfig(
                &context, VAProfileH264High, VAEntrypointVLD,
-               NULL, 0, NULL) == VA_STATUS_ERROR_UNIMPLEMENTED);
+               NULL, 0, NULL) == VA_STATUS_ERROR_INVALID_PARAMETER);
 
     assert(vtable.vaTerminate(&context) == VA_STATUS_SUCCESS);
     assert(context.pDriverData == NULL);

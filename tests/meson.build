@@ -24,6 +24,13 @@ h264_annexb_test = executable(
   dependencies: [libva_dep],
 )
 
+backend_objects_test = executable(
+  'test-backend-objects',
+  driver_sources + files('test_backend_objects.c'),
+  include_directories: project_inc,
+  dependencies: [libva_dep, threads_dep],
+)
+
 driver_init_test = executable(
   'test-driver-init',
   driver_sources + files('test_driver_init.c'),
@@ -42,6 +49,7 @@ test('capabilities', capabilities_test)
 test('annexb-split', annexb_split_test)
 test('v4l2-decoder', v4l2_decoder_test)
 test('h264-annexb', h264_annexb_test)
+test('backend-objects', backend_objects_test)
 test('driver-init', driver_init_test)
 test('driver-load', driver_load_test, args: [venus_driver])
 
