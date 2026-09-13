@@ -5,9 +5,8 @@ initially targeting Xiaomi Redmi K20 Pro / Mi 9T Pro (Raphael, SM8150).
 
 ## Current status
 
-**H.264 VLD is validated for progressive 8-bit video at 640x480. The
-H.264 EncSlice path is implemented and awaiting end-to-end device validation.
-Other codecs remain disabled.**
+**H.264 VLD and EncSlice are validated for progressive 8-bit video at
+640x480. Other codecs remain disabled.**
 
 The repository currently provides:
 
@@ -37,7 +36,7 @@ because libva searches compatible lower minor-version init symbols.
 
 | Codec | Decode | Encode |
 | --- | --- | --- |
-| H.264 Baseline/Main/High | Baseline validated; Main/High pending | V4L2 session validated; VA EncSlice pending |
+| H.264 Baseline/Main/High | Baseline validated; Main/High pending | High EncSlice validated at 640x480 |
 | HEVC Main 8-bit | planned | planned |
 | VP8 | planned | planned |
 | VP9 Profile 0 | planned | not exposed |

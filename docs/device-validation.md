@@ -44,6 +44,27 @@ Result:
 - software decoding recovered 30 frames and 13,824,000 NV12 bytes;
 - EOS drain completed successfully.
 
-The VA-API EncSlice test remains a separate validation because it also covers
-surface upload, VA encoding parameter translation, coded-buffer ownership and
-both VA synchronization paths.
+## H.264 VA-API EncSlice
+
+Validated on the same device with the `h264_vaapi` FFmpeg encoder.
+
+Test command:
+
+```bash
+sudo ./tests/run-vaapi-h264-encode.sh
+```
+
+Result:
+
+- `vainfo` reported H.264 Constrained Baseline, Main and High EncSlice;
+- FFmpeg uploaded and encoded 30 progressive 640x480 NV12 frames;
+- the encoded Annex-B stream was 96,976 bytes;
+- software decoding recovered 30 frames and 13,824,000 NV12 bytes;
+- the independent V4L2 frame tags increased monotonically from 1 through 30;
+- the coded-buffer FIFO drained to zero without timeout or a Venus session
+  error.
+
+This validates CPU-backed NV12 upload, CBR parameter translation,
+`VAEncCodedBufferType`, `vaSyncBuffer` and FFmpeg's coded-buffer reuse.
+Higher resolutions, concurrent sessions and long-running encoding remain
+separate milestones.
