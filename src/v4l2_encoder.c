@@ -475,15 +475,6 @@ int venus_v4l2_encoder_open(
             goto fail;
     }
 
-    status = stream_on(
-        encoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-    if (status < 0)
-        goto fail;
-    status = stream_on(
-        encoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-    if (status < 0)
-        goto fail;
-
     *result = encoder;
     return 0;
 
@@ -712,7 +703,6 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
     };
     size_t expected_size;
     size_t packed_size;
-    size_t submitted_size;
     uint32_t stride;
     uint32_t scanlines;
     int index;
@@ -753,17 +743,13 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
         encoder->visible_height, &packed_size);
     if (status < 0)
         return status;
-    submitted_size = encoder->output[index].length;
-    if (packed_size > submitted_size || submitted_size > UINT32_MAX)
+    if (packed_size > UINT32_MAX)
         return -EOVERFLOW;
-    if (packed_size < submitted_size)
-        memset((uint8_t *)encoder->output[index].data + packed_size,
-               0, submitted_size - packed_size);
 
     buffer.index = (unsigned int)index;
     buffer.timestamp.tv_sec = (long)(tag / 1000000u);
     buffer.timestamp.tv_usec = (long)(tag % 1000000u);
-    planes[0].bytesused = (uint32_t)submitted_size;
+    planes[0].bytesused = (uint32_t)packed_size;
     planes[0].length = (uint32_t)encoder->output[index].length;
 
     if (xioctl(encoder->fd, VIDIOC_QBUF, &buffer) < 0) {
@@ -772,13 +758,32 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
         snprintf(
             encoder->last_operation,
             sizeof(encoder->last_operation),
-            "QBUF_OUT %ux%u stride=%u payload=%zu used=%zu",
+            "QBUF_OUT %ux%u stride=%u used=%zu len=%zu",
             encoder->visible_width, encoder->visible_height,
-            stride, packed_size, submitted_size);
+            stride, packed_size, encoder->output[index].length);
         return -saved_errno;
     }
 
     encoder->output[index].queued = true;
+
+    /*
+     * Stateful V4L2 encoders expect the first raw frame to be queued before
+     * either queue is started.  This is the ordering used by FFmpeg's
+     * v4l2_m2m encoder and GStreamer's v4l2 buffer pool.
+     */
+    if (!encoder->output_streaming) {
+        status = stream_on(
+            encoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        if (status < 0)
+            return status;
+    }
+    if (!encoder->capture_streaming) {
+        status = stream_on(
+            encoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+        if (status < 0)
+            return status;
+    }
+
     return 0;
 }
 
