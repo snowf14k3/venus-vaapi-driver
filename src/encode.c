@@ -367,24 +367,68 @@ static uint32_t level_to_v4l2(uint8_t level_idc)
 }
 
 int venus_encode_queue_coded_buffer_locked(
-    struct venus_context *context, VABufferID buffer_id)
+    struct venus_context *context, VABufferID buffer_id,
+    uint64_t tag)
 {
+    struct venus_buffer *buffer;
+    size_t offset;
     size_t tail;
 
+    if (!context || !context->backend || tag == 0)
+        return -EINVAL;
     if (context->encode_queue_count >= VENUS_MAX_SURFACES)
         return -ENOSPC;
+
+    buffer = venus_backend_find_buffer(
+        context->backend, buffer_id);
+    if (!buffer || buffer->type != VAEncCodedBufferType ||
+        buffer->context_id != context->id)
+        return -ENOENT;
+
+    for (offset = 0; offset < context->encode_queue_count;
+         offset++) {
+        size_t index =
+            (context->encode_queue_head + offset) %
+            VENUS_MAX_SURFACES;
+
+        if (context->encode_queue[index] == buffer_id)
+            return -EALREADY;
+    }
 
     tail = (context->encode_queue_head +
             context->encode_queue_count) %
            VENUS_MAX_SURFACES;
     context->encode_queue[tail] = buffer_id;
     context->encode_queue_count++;
+    buffer->coded_tag = tag;
     return 0;
+}
+
+static void remove_encode_queue_entry(
+    struct venus_context *context, size_t offset)
+{
+    size_t index;
+
+    for (index = offset;
+         index + 1 < context->encode_queue_count;
+         index++) {
+        size_t destination =
+            (context->encode_queue_head + index) %
+            VENUS_MAX_SURFACES;
+        size_t source =
+            (context->encode_queue_head + index + 1) %
+            VENUS_MAX_SURFACES;
+
+        context->encode_queue[destination] =
+            context->encode_queue[source];
+    }
+    context->encode_queue_count--;
 }
 
 static void rollback_coded_buffer(struct venus_context *context,
                                   VABufferID buffer_id)
 {
+    struct venus_buffer *buffer;
     size_t tail;
 
     if (context->encode_queue_count == 0)
@@ -393,8 +437,13 @@ static void rollback_coded_buffer(struct venus_context *context,
     tail = (context->encode_queue_head +
             context->encode_queue_count - 1) %
            VENUS_MAX_SURFACES;
-    if (context->encode_queue[tail] == buffer_id)
+    if (context->encode_queue[tail] == buffer_id) {
         context->encode_queue_count--;
+        buffer = venus_backend_find_buffer(
+            context->backend, buffer_id);
+        if (buffer)
+            buffer->coded_tag = 0;
+    }
 }
 
 int venus_encode_store_packet_locked(
@@ -406,16 +455,35 @@ int venus_encode_store_packet_locked(
     struct venus_surface *surface;
     VABufferID buffer_id;
     size_t capacity;
+    size_t offset;
+    bool complete;
 
     if (!packet || !context || !context->backend ||
+        packet->tag == 0 ||
         context->encode_queue_count == 0)
         return -EINVAL;
 
     backend = context->backend;
-    buffer_id =
-        context->encode_queue[context->encode_queue_head];
-    buffer = venus_backend_find_buffer(backend, buffer_id);
-    if (!buffer || buffer->type != VAEncCodedBufferType)
+    buffer = NULL;
+    buffer_id = VA_INVALID_ID;
+    for (offset = 0; offset < context->encode_queue_count;
+         offset++) {
+        size_t index =
+            (context->encode_queue_head + offset) %
+            VENUS_MAX_SURFACES;
+        struct venus_buffer *candidate;
+
+        buffer_id = context->encode_queue[index];
+        candidate = venus_backend_find_buffer(
+            backend, buffer_id);
+        if (candidate &&
+            candidate->type == VAEncCodedBufferType &&
+            candidate->coded_tag == packet->tag) {
+            buffer = candidate;
+            break;
+        }
+    }
+    if (!buffer)
         return -ENOENT;
 
     if (buffer->element_size >
@@ -432,17 +500,35 @@ int venus_encode_store_packet_locked(
     memcpy(buffer->data + buffer->coded_size,
            packet->data, packet->size);
     buffer->coded_size += packet->size;
+    buffer->coded_packets++;
     buffer->coded_segment.size = (uint32_t)buffer->coded_size;
     buffer->coded_segment.buf = buffer->data;
     buffer->coded_segment.bit_offset = 0;
     buffer->coded_segment.next = NULL;
+
+    if (packet->flags & V4L2_BUF_FLAG_ERROR)
+        buffer->coded_segment.status |=
+            VA_CODED_BUF_STATUS_BAD_BITSTREAM;
+
+    complete =
+        (packet->flags &
+         (V4L2_BUF_FLAG_KEYFRAME |
+          V4L2_BUF_FLAG_PFRAME |
+          V4L2_BUF_FLAG_BFRAME)) != 0;
+    if (!complete) {
+        venus_backend_log(
+            backend,
+            "encoded part buffer=0x%x surface=0x%x bytes=%zu packets=%u flags=0x%x driver-tag=0x%llx complete=0 queued=%zu",
+            buffer->id, buffer->source_surface_id,
+            buffer->coded_size, buffer->coded_packets,
+            packet->flags,
+            (unsigned long long)packet->tag,
+            context->encode_queue_count);
+        return 0;
+    }
+
     buffer->coded_ready = true;
-
-    context->encode_queue_head =
-        (context->encode_queue_head + 1) %
-        VENUS_MAX_SURFACES;
-    context->encode_queue_count--;
-
+    remove_encode_queue_entry(context, offset);
     surface = venus_backend_find_surface(
         backend, buffer->source_surface_id);
     if (surface &&
@@ -451,9 +537,10 @@ int venus_encode_store_packet_locked(
 
     venus_backend_log(
         backend,
-        "encoded buffer=0x%x surface=0x%x bytes=%zu flags=0x%x driver-tag=0x%llx queued=%zu",
+        "encoded buffer=0x%x surface=0x%x bytes=%zu packets=%u flags=0x%x driver-tag=0x%llx complete=1 queued=%zu",
         buffer->id, buffer->source_surface_id,
-        buffer->coded_size, packet->flags,
+        buffer->coded_size, buffer->coded_packets,
+        packet->flags,
         (unsigned long long)packet->tag,
         context->encode_queue_count);
     return 0;
@@ -788,15 +875,22 @@ VAStatus venus_encode_end_picture_locked(
         return venus_backend_encode_status_from_errno(status);
     }
 
+    context->encode_sequence++;
+    if (context->encode_sequence == 0)
+        context->encode_sequence++;
+    frame_tag = context->encode_sequence;
+
     coded->coded_size = 0;
     coded->coded_ready = false;
+    coded->coded_packets = 0;
+    coded->coded_tag = 0;
     coded->source_surface_id = surface->id;
     memset(&coded->coded_segment, 0,
            sizeof(coded->coded_segment));
     coded->coded_segment.buf = coded->data;
 
     status = venus_encode_queue_coded_buffer_locked(
-        context, coded->id);
+        context, coded->id, frame_tag);
     if (status < 0) {
         free(allocated_frame);
         venus_surface_end_cpu_read(surface);
@@ -805,11 +899,6 @@ VAStatus venus_encode_end_picture_locked(
 
     surface->encode_pending = true;
     surface->coded_buffer_id = coded->id;
-
-    context->encode_sequence++;
-    if (context->encode_sequence == 0)
-        context->encode_sequence++;
-    frame_tag = context->encode_sequence;
 
     status = venus_v4l2_encoder_submit(
         context->encoder, frame_data,

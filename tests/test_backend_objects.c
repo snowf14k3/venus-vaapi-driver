@@ -83,11 +83,12 @@ int main(void)
         .height = 48,
         .bytes_per_line = 64,
     };
-    const uint8_t first_packet_data[] = { 0x00, 0x00, 0x01, 0x65 };
-    const uint8_t second_packet_data[] = { 0x00, 0x00, 0x01, 0x41 };
+    const uint8_t header_packet_data[] = { 0x00, 0x00, 0x01, 0x67 };
+    const uint8_t first_frame_data[] = { 0x00, 0x00, 0x01, 0x65 };
+    const uint8_t second_frame_data[] = { 0x00, 0x00, 0x01, 0x41 };
     struct venus_v4l2_packet packet = {
-        .data = first_packet_data,
-        .size = sizeof(first_packet_data),
+        .data = header_packet_data,
+        .size = sizeof(header_packet_data),
     };
     VAImage image;
     VAImage derived;
@@ -253,28 +254,60 @@ int main(void)
     assert(first_coded != NULL);
     assert(second_coded != NULL);
     assert(venus_encode_queue_coded_buffer_locked(
-               internal_context, coded_buffers[0]) == 0);
+               internal_context, coded_buffers[0], 101) == 0);
     assert(venus_encode_queue_coded_buffer_locked(
-               internal_context, coded_buffers[1]) == 0);
+               internal_context, coded_buffers[0], 101) == -EALREADY);
+    assert(venus_encode_queue_coded_buffer_locked(
+               internal_context, coded_buffers[1], 0) == -EINVAL);
+    assert(venus_encode_queue_coded_buffer_locked(
+               internal_context, coded_buffers[1], 202) == 0);
+    assert(first_coded->coded_tag == 101);
+    assert(second_coded->coded_tag == 202);
 
-    packet.tag = coded_buffers[1];
+    packet.tag = 101;
+    packet.flags = 0;
     assert(venus_encode_store_packet_locked(
                internal_context, &packet) == 0);
-    assert(first_coded->coded_ready);
-    assert(first_coded->coded_size == sizeof(first_packet_data));
-    assert(memcmp(first_coded->data, first_packet_data,
-                  sizeof(first_packet_data)) == 0);
+    assert(!first_coded->coded_ready);
+    assert(first_coded->coded_size == sizeof(header_packet_data));
+    assert(first_coded->coded_packets == 1);
+    assert(memcmp(first_coded->data, header_packet_data,
+                  sizeof(header_packet_data)) == 0);
     assert(!second_coded->coded_ready);
+    assert(internal_context->encode_queue_count == 2);
 
-    packet.data = second_packet_data;
-    packet.size = sizeof(second_packet_data);
-    packet.tag = coded_buffers[0];
+    packet.data = second_frame_data;
+    packet.size = sizeof(second_frame_data);
+    packet.tag = 202;
+    packet.flags = V4L2_BUF_FLAG_PFRAME;
     assert(venus_encode_store_packet_locked(
                internal_context, &packet) == 0);
     assert(second_coded->coded_ready);
-    assert(second_coded->coded_size == sizeof(second_packet_data));
-    assert(memcmp(second_coded->data, second_packet_data,
-                  sizeof(second_packet_data)) == 0);
+    assert(second_coded->coded_size == sizeof(second_frame_data));
+    assert(second_coded->coded_packets == 1);
+    assert(memcmp(second_coded->data, second_frame_data,
+                  sizeof(second_frame_data)) == 0);
+    assert(!first_coded->coded_ready);
+    assert(internal_context->encode_queue_count == 1);
+
+    packet.tag = 303;
+    assert(venus_encode_store_packet_locked(
+               internal_context, &packet) == -ENOENT);
+
+    packet.data = first_frame_data;
+    packet.size = sizeof(first_frame_data);
+    packet.tag = 101;
+    packet.flags = V4L2_BUF_FLAG_KEYFRAME;
+    assert(venus_encode_store_packet_locked(
+               internal_context, &packet) == 0);
+    assert(first_coded->coded_ready);
+    assert(first_coded->coded_size ==
+           sizeof(header_packet_data) + sizeof(first_frame_data));
+    assert(first_coded->coded_packets == 2);
+    assert(memcmp(first_coded->data, header_packet_data,
+                  sizeof(header_packet_data)) == 0);
+    assert(memcmp(first_coded->data + sizeof(header_packet_data),
+                  first_frame_data, sizeof(first_frame_data)) == 0);
     assert(internal_context->encode_queue_count == 0);
 
     assert(vtable.vaDestroyBuffer(

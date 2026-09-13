@@ -144,6 +144,21 @@ behavior. The companion kernel patch changes only IRIS1 H.264/HEVC CBR
 sessions; VBR, CQ, VP8 and other Venus generations retain their existing
 contracts.
 
+## 0.8.0 coded-output routing
+
+After the complete CBR contract reached firmware start, IRIS1 returned the
+first frame as two CAPTURE buffers with the same copied timestamp: a 29-byte
+codec-header buffer without a frame-type flag, followed by the IDR buffer
+with `V4L2_BUF_FLAG_KEYFRAME`. The old backend completed and removed one VA
+coded buffer for every CAPTURE buffer, so it delivered SPS/PPS and IDR to two
+different GNOME frames.
+
+Version 0.8.0 records the submitted V4L2 timestamp on each queued VA coded
+buffer, appends every matching CAPTURE packet, and only completes that VA
+buffer when Venus returns KEYFRAME, PFRAME or BFRAME. Matching by timestamp
+also preserves the correct destination when CAPTURE completion order differs
+from VA submission order.
+
 ## Validation boundary
 
 Host validation must include GCC and Clang builds, all Meson tests, diff

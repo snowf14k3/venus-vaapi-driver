@@ -77,6 +77,8 @@ struct venus_buffer {
     bool owns_data;
     bool coded_ready;
     size_t coded_size;
+    unsigned int coded_packets;
+    uint64_t coded_tag;
     VASurfaceID source_surface_id;
     VACodedBufferSegment coded_segment;
 };
@@ -162,7 +164,8 @@ VAStatus venus_encode_end_picture_locked(
     struct venus_backend *backend, struct venus_context *context,
     const struct venus_config *config);
 int venus_encode_queue_coded_buffer_locked(
-    struct venus_context *context, VABufferID buffer_id);
+    struct venus_context *context, VABufferID buffer_id,
+    uint64_t tag);
 int venus_encode_store_packet_locked(
     struct venus_context *context,
     const struct venus_v4l2_packet *packet);

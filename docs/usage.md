@@ -95,8 +95,9 @@ Reconnect the RDP client, then verify the live encoder path:
 ```
 
 A passing result requires GNOME's successful VAAPI initialization and encode
-session messages together with the driver's `encoder-open` and
-`encoded buffer` traces.
+session messages together with the driver's `encoder-open`, matching
+`encoded part`/`encoded buffer` tag, and `complete=1` traces. It also rejects
+new Venus session errors and a stopped RDP service.
 
 ## Current limits
 
@@ -110,6 +111,8 @@ session messages together with the driver's `encoder-open` and
   visible dimensions in either orientation;
 - H.264 encode level selection uses the IRIS1 firmware-auto contract from
   Raphael kernel patch 0029;
+- the first raw frame's separate SPS/PPS and IDR CAPTURE packets are joined
+  by their V4L2 timestamp before the VA coded buffer becomes ready;
 - the first raw frame is queued before OUTPUT and CAPTURE STREAMON, matching
   FFmpeg and GStreamer's stateful V4L2 encoder lifecycle;
 - CPU-backed NV12 surfaces for ordinary VAAPI clients and linear DMA-BUF
