@@ -375,6 +375,7 @@ VAStatus venus_encode_end_picture_locked(
     struct venus_surface *surface;
     size_t coded_capacity;
     size_t expected_frame_size;
+    uint64_t frame_tag;
     int status;
 
     status = collect_parameters(backend, context, &parameters);
@@ -431,9 +432,14 @@ VAStatus venus_encode_end_picture_locked(
     surface->encode_pending = true;
     surface->coded_buffer_id = coded->id;
 
+    context->encode_sequence++;
+    if (context->encode_sequence == 0)
+        context->encode_sequence++;
+    frame_tag = context->encode_sequence;
+
     status = venus_v4l2_encoder_submit(
         context->encoder, surface->data,
-        expected_frame_size, coded->id,
+        expected_frame_size, frame_tag,
         store_packet, context);
     if (status < 0) {
         rollback_coded_buffer(context, coded->id);
@@ -450,8 +456,9 @@ VAStatus venus_encode_end_picture_locked(
 
     venus_backend_log(
         backend,
-        "encode-submit context=0x%x surface=0x%x coded=0x%x bytes=%zu",
+        "encode-submit context=0x%x surface=0x%x coded=0x%x frame=%llu bytes=%zu",
         context->id, surface->id, coded->id,
+        (unsigned long long)frame_tag,
         expected_frame_size);
     return VA_STATUS_SUCCESS;
 }

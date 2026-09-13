@@ -92,6 +92,7 @@ struct venus_context {
     VABufferID encode_queue[VENUS_MAX_SURFACES];
     size_t encode_queue_head;
     size_t encode_queue_count;
+    uint64_t encode_sequence;
 };
 
 struct venus_backend {
