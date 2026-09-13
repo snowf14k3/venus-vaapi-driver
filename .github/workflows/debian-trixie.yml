@@ -1,0 +1,33 @@
+name: Debian 13
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: debian:trixie-slim
+
+    steps:
+      - name: Install checkout dependencies
+        run: |
+          apt-get update
+          apt-get install -y ca-certificates git
+
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get install -y             build-essential             file             meson             ninja-build             pkg-config             libva-dev             libdrm-dev
+
+      - name: Build and test
+        run: |
+          meson setup build
+          meson compile -C build
+          meson test -C build --print-errorlogs
+          file build/venus_drv_video.so
+          nm -D --defined-only build/venus_drv_video.so

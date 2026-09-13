@@ -1,0 +1,6 @@
+/build/
+/build-*/
+*.o
+*.so
+*.plist
+compile_commands.json

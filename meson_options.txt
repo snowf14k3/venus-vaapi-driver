@@ -1,0 +1,8 @@
+option(
+  'probe_limit',
+  type: 'integer',
+  min: 1,
+  max: 256,
+  value: 64,
+  description: 'Highest /dev/video index scanned by the runtime probe',
+)
