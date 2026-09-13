@@ -115,7 +115,8 @@ Run the full resolution, round-trip and repeated-session matrix:
 sudo ./tests/run-vaapi-h264-matrix.sh
 ```
 
-The matrix covers 640x480, 720p, 1080p and a 300-frame 720p session. It
+The matrix covers 640x480, 720p, 1080p, the Raphael display's
+1080x2340 and 2340x1080 orientations, and a 300-frame 720p session. It
 compares software and VAAPI decoded frame hashes and verifies visible
 dimensions and kernel logs.
 

@@ -73,16 +73,18 @@ Run the complete H.264 matrix before system installation:
 sudo ./tests/run-vaapi-h264-matrix.sh
 ```
 
-It tests 640x480, 720p, 1080p and a 300-frame 720p session. Every encoded
-stream is software-decoded and VAAPI-decoded; the decoded frame hashes,
-frame counts and visible dimensions must match.
+It tests 640x480, 720p, 1080p, 1080x2340 portrait,
+2340x1080 landscape and a 300-frame 720p session. Every encoded stream is
+software-decoded and VAAPI-decoded; the decoded frame hashes, frame counts
+and visible dimensions must match.
 
 ## Current limits
 
 - progressive H.264 8-bit encoding and decoding;
 - CBR encoding with no B frames;
 - CPU-backed NV12 VA surfaces;
-- maximum advertised coded size 1920x1088;
+- maximum advertised width and height of 4096, subject to the SM8150
+  H.264 limit of 36,864 macroblocks per frame;
 - DRM PRIME export and zero-copy GPU interop are not implemented;
 - concurrent sessions and long-running service workloads still require
   application-specific testing.

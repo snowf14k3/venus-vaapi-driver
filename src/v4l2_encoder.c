@@ -28,6 +28,8 @@ struct venus_v4l2_encoder {
     unsigned int capture_count;
     struct v4l2_pix_format_mplane output_format;
     struct v4l2_pix_format_mplane capture_format;
+    uint32_t visible_width;
+    uint32_t visible_height;
     bool output_streaming;
     bool capture_streaming;
     bool stop_sent;
@@ -189,7 +191,8 @@ static int set_parameters(
 
     return set_control(
         encoder, V4L2_CID_MPEG_VIDEO_H264_LEVEL,
-        V4L2_MPEG_VIDEO_H264_LEVEL_4_1, "S_CTRL(H264_LEVEL)");
+        (int32_t)config->h264_level,
+        "S_CTRL(H264_LEVEL)");
 }
 
 static int request_and_map(struct venus_v4l2_encoder *encoder,
@@ -371,6 +374,8 @@ int venus_v4l2_encoder_open(
     if (!encoder)
         return -ENOMEM;
     encoder->fd = -1;
+    encoder->visible_width = config->width;
+    encoder->visible_height = config->height;
 
     encoder->fd =
         open(config->device, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -576,6 +581,66 @@ static int find_free_output(struct venus_v4l2_encoder *encoder,
     }
 }
 
+int venus_v4l2_encoder_pack_nv12(
+    uint8_t *destination, size_t destination_size,
+    uint32_t destination_stride, uint32_t destination_scanlines,
+    const uint8_t *source, uint32_t width, uint32_t height,
+    size_t *packed_size)
+{
+    size_t source_luma_size;
+    size_t destination_luma_size;
+    size_t destination_chroma_scanlines;
+    size_t required;
+    unsigned int row;
+
+    if (!destination || !source || !packed_size ||
+        width == 0 || height == 0 ||
+        (width & 1u) || (height & 1u) ||
+        destination_stride < width ||
+        destination_scanlines < height)
+        return -EINVAL;
+    if (width > SIZE_MAX / height ||
+        destination_stride >
+            SIZE_MAX / destination_scanlines)
+        return -EOVERFLOW;
+
+    source_luma_size = (size_t)width * height;
+    destination_luma_size =
+        (size_t)destination_stride * destination_scanlines;
+    destination_chroma_scanlines =
+        ((size_t)height / 2u + 15u) / 16u * 16u;
+    if (destination_stride >
+            SIZE_MAX / destination_chroma_scanlines ||
+        destination_luma_size >
+            SIZE_MAX -
+                (size_t)destination_stride *
+                    destination_chroma_scanlines)
+        return -EOVERFLOW;
+
+    required =
+        destination_luma_size +
+        (size_t)destination_stride *
+            destination_chroma_scanlines;
+    if (required > destination_size)
+        return -ENOSPC;
+
+    memset(destination, 0, required);
+    for (row = 0; row < height; row++)
+        memcpy(destination +
+                   (size_t)row * destination_stride,
+               source + (size_t)row * width, width);
+
+    for (row = 0; row < height / 2; row++)
+        memcpy(destination + destination_luma_size +
+                   (size_t)row * destination_stride,
+               source + source_luma_size +
+                   (size_t)row * width,
+               width);
+
+    *packed_size = required;
+    return 0;
+}
+
 int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
                               const uint8_t *data, size_t size,
                               uint64_t tag,
@@ -589,22 +654,55 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
         .length = 1,
         .m.planes = planes,
     };
+    size_t expected_size;
+    size_t packed_size;
+    uint32_t stride;
+    uint32_t scanlines;
     int index;
+    int status;
 
-    if (!encoder || !data || size == 0)
+    if (!encoder || !data || size == 0 ||
+        encoder->visible_width == 0 ||
+        encoder->visible_height == 0 ||
+        encoder->visible_width >
+            SIZE_MAX / encoder->visible_height)
+        return -EINVAL;
+
+    expected_size =
+        (size_t)encoder->visible_width *
+        encoder->visible_height;
+    if (expected_size >
+        SIZE_MAX - expected_size / 2)
+        return -EOVERFLOW;
+    expected_size += expected_size / 2;
+    if (size != expected_size)
         return -EINVAL;
 
     index = find_free_output(encoder, callback, opaque);
     if (index < 0)
         return index;
-    if (size > encoder->output[index].length)
-        return -ENOSPC;
 
-    memcpy(encoder->output[index].data, data, size);
+    stride =
+        encoder->output_format.plane_fmt[0].bytesperline;
+    if (stride == 0)
+        stride = encoder->visible_width;
+    scanlines =
+        (encoder->visible_height + 31u) / 32u * 32u;
+    status = venus_v4l2_encoder_pack_nv12(
+        encoder->output[index].data,
+        encoder->output[index].length,
+        stride, scanlines, data,
+        encoder->visible_width,
+        encoder->visible_height, &packed_size);
+    if (status < 0)
+        return status;
+    if (packed_size > UINT32_MAX)
+        return -EOVERFLOW;
+
     buffer.index = (unsigned int)index;
     buffer.timestamp.tv_sec = (long)(tag / 1000000u);
     buffer.timestamp.tv_usec = (long)(tag % 1000000u);
-    planes[0].bytesused = (uint32_t)size;
+    planes[0].bytesused = (uint32_t)packed_size;
     planes[0].length = (uint32_t)encoder->output[index].length;
 
     if (xioctl(encoder->fd, VIDIOC_QBUF, &buffer) < 0)

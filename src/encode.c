@@ -208,6 +208,10 @@ int venus_encode_h264_dimensions(
         (uint32_t)sequence->picture_width_in_mbs * 16u;
     coded_height =
         (uint32_t)sequence->picture_height_in_mbs * 16u;
+    if ((uint32_t)sequence->picture_width_in_mbs *
+            sequence->picture_height_in_mbs >
+        VENUS_H264_MAX_MACROBLOCKS)
+        return -EINVAL;
 
     if (sequence->frame_cropping_flag) {
         uint64_t horizontal =
@@ -246,6 +250,48 @@ static uint32_t profile_to_v4l2(VAProfile profile)
         return V4L2_MPEG_VIDEO_H264_PROFILE_MAIN;
     case VAProfileH264High:
         return V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
+    default:
+        return UINT32_MAX;
+    }
+}
+
+static uint32_t level_to_v4l2(uint8_t level_idc)
+{
+    switch (level_idc) {
+    case 9:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_1B;
+    case 10:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_1_0;
+    case 11:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_1_1;
+    case 12:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_1_2;
+    case 13:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_1_3;
+    case 20:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_2_0;
+    case 21:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_2_1;
+    case 22:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_2_2;
+    case 30:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_3_0;
+    case 31:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_3_1;
+    case 32:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_3_2;
+    case 40:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_4_0;
+    case 41:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_4_1;
+    case 42:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_4_2;
+    case 50:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_5_0;
+    case 51:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_5_1;
+    case 52:
+        return V4L2_MPEG_VIDEO_H264_LEVEL_5_2;
     default:
         return UINT32_MAX;
     }
@@ -359,6 +405,7 @@ static int open_encoder(
     struct venus_v4l2_encoder_config encoder_config;
     struct venus_v4l2_error error;
     uint32_t profile = profile_to_v4l2(config->profile);
+    uint32_t level;
     uint32_t bitrate = parameters->bitrate;
     uint32_t frames_per_second = parameters->frames_per_second;
     uint32_t encode_width;
@@ -368,6 +415,10 @@ static int open_encoder(
 
     if (!parameters->sequence || profile == UINT32_MAX)
         return -EINVAL;
+
+    level = level_to_v4l2(parameters->sequence->level_idc);
+    if (level == UINT32_MAX)
+        return -ENOTSUP;
 
     status = venus_encode_h264_dimensions(
         parameters->sequence, &encode_width, &encode_height);
@@ -386,6 +437,11 @@ static int open_encoder(
 
     if (frames_per_second == 0)
         frames_per_second = VENUS_ENCODE_DEFAULT_FPS;
+    if ((context->width / 16u) *
+            (context->height / 16u) >
+        VENUS_H264_MAX_MACROBLOCKS_PER_SECOND /
+            frames_per_second)
+        return -EINVAL;
 
     gop_size = parameters->sequence->intra_idr_period;
     if (gop_size == 0)
@@ -405,6 +461,7 @@ static int open_encoder(
         .bitrate = bitrate,
         .gop_size = gop_size,
         .h264_profile = profile,
+        .h264_level = level,
         .capture_buffer_size = coded_capacity,
         .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
         .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
@@ -423,8 +480,9 @@ static int open_encoder(
 
     venus_backend_log(
         backend,
-        "encoder-open context=0x%x profile=%d size=%ux%u fps=%u bitrate=%u gop=%u output=%u capture=%u",
+        "encoder-open context=0x%x profile=%d level=%u size=%ux%u fps=%u bitrate=%u gop=%u output=%u capture=%u",
         context->id, config->profile,
+        parameters->sequence->level_idc,
         context->encode_width, context->encode_height,
         frames_per_second, bitrate, gop_size,
         venus_v4l2_encoder_output_count(context->encoder),

@@ -19,6 +19,7 @@ struct venus_v4l2_encoder_config {
     uint32_t bitrate;
     uint32_t gop_size;
     uint32_t h264_profile;
+    uint32_t h264_level;
     size_t capture_buffer_size;
     unsigned int output_buffers;
     unsigned int capture_buffers;
@@ -43,6 +44,11 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
                               uint64_t tag,
                               venus_v4l2_packet_callback callback,
                               void *opaque);
+int venus_v4l2_encoder_pack_nv12(
+    uint8_t *destination, size_t destination_size,
+    uint32_t destination_stride, uint32_t destination_scanlines,
+    const uint8_t *source, uint32_t width, uint32_t height,
+    size_t *packed_size);
 int venus_v4l2_encoder_pump(struct venus_v4l2_encoder *encoder,
                             int timeout_ms,
                             venus_v4l2_packet_callback callback,

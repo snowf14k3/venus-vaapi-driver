@@ -53,6 +53,7 @@ grep -E 'Driver version|VAProfileH264|va_openDriver' \
 
 FAILED=0
 PASSED=0
+TOTAL_CASES=6
 
 run_case()
 {
@@ -169,6 +170,8 @@ run_case()
 run_case sd-640x480      640  480 15  30 1000000
 run_case hd-1280x720    1280  720 30  90 4000000
 run_case fhd-1920x1080  1920 1080 30  60 8000000
+run_case native-portrait 1080 2340 30  60 10000000
+run_case native-landscape 2340 1080 30 60 10000000
 run_case stress-720p    1280  720 30 300 4000000
 
 dmesg |
@@ -188,7 +191,7 @@ else
 fi
 
 echo "=== 汇总 ==="
-echo "通过：${PASSED}/4"
+echo "通过：${PASSED}/${TOTAL_CASES}"
 echo "失败：${FAILED}"
 echo "日志目录：${OUT}"
 
@@ -197,7 +200,7 @@ if (( VAINFO_RC != 0 )) ||
        'VAProfileH264High[[:space:]]*:[[:space:]]*VAEntrypointEncSlice' \
        "${OUT}/vainfo.log" ||
    (( FAILED != 0 )) ||
-   (( PASSED != 4 )); then
+   (( PASSED != TOTAL_CASES )); then
     exit 1
 fi
 

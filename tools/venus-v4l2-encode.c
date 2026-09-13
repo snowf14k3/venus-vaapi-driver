@@ -140,6 +140,7 @@ int main(int argc, char **argv)
         .bitrate = bitrate,
         .gop_size = frames_per_second,
         .h264_profile = V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE,
+        .h264_level = V4L2_MPEG_VIDEO_H264_LEVEL_4_1,
         .capture_buffer_size = 1024 * 1024,
         .output_buffers = 4,
         .capture_buffers = 16,
