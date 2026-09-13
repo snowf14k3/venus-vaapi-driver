@@ -25,3 +25,25 @@ Result:
 This validates CPU-backed NV12 download. DMA-BUF export, interlaced H.264,
 custom scaling matrices, picture-order-count type 1, higher resolutions,
 seeking, concurrency and long-running playback remain separate milestones.
+
+## H.264 stateful V4L2 encode
+
+Validated on the same device before enabling the VA-API encode entrypoint.
+
+Test command:
+
+```bash
+sudo ./tests/run-v4l2-h264-encode.sh
+```
+
+Result:
+
+- 30 progressive 640x480 NV12 frames were submitted to qcom-venus;
+- the encoder used 4 OUTPUT buffers and 16 CAPTURE buffers;
+- the encoded Annex-B stream was 89,056 bytes;
+- software decoding recovered 30 frames and 13,824,000 NV12 bytes;
+- EOS drain completed successfully.
+
+The VA-API EncSlice test remains a separate validation because it also covers
+surface upload, VA encoding parameter translation, coded-buffer ownership and
+both VA synchronization paths.

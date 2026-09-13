@@ -4,6 +4,7 @@
 
 #include "venus/capabilities.h"
 #include "v4l2_decoder.h"
+#include "v4l2_encoder.h"
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -34,6 +35,7 @@ struct venus_config {
     VAConfigID id;
     VAProfile profile;
     VAEntrypoint entrypoint;
+    uint32_t rate_control;
 };
 
 struct venus_surface {
@@ -46,6 +48,8 @@ struct venus_surface {
     size_t capacity;
     size_t data_size;
     bool ready;
+    bool encode_pending;
+    VABufferID coded_buffer_id;
     VAContextID context_id;
 };
 
@@ -59,6 +63,10 @@ struct venus_buffer {
     size_t num_elements;
     uint8_t *data;
     bool owns_data;
+    bool coded_ready;
+    size_t coded_size;
+    VASurfaceID source_surface_id;
+    VACodedBufferSegment coded_segment;
 };
 
 struct venus_image {
@@ -75,6 +83,7 @@ struct venus_context {
     unsigned int width;
     unsigned int height;
     struct venus_v4l2_decoder *decoder;
+    struct venus_v4l2_encoder *encoder;
     bool in_picture;
     VASurfaceID target;
     VABufferID pending[VENUS_MAX_PENDING_BUFFERS];
@@ -100,6 +109,10 @@ bool venus_backend_h264_profile(VAProfile profile);
 bool venus_backend_h264_vld_supported(const struct venus_backend *backend,
                                       VAProfile profile,
                                       VAEntrypoint entrypoint);
+bool venus_backend_h264_enc_supported(const struct venus_backend *backend,
+                                      VAProfile profile,
+                                      VAEntrypoint entrypoint);
+VAStatus venus_backend_encode_status_from_errno(int status);
 
 struct venus_config *venus_backend_find_config(struct venus_backend *backend,
                                                VAConfigID id);
@@ -117,5 +130,16 @@ void venus_objects_fill_vtable(struct VADriverVTable *vtable);
 void venus_objects_destroy_all(struct venus_backend *backend);
 void venus_decode_fill_vtable(struct VADriverVTable *vtable);
 void venus_decode_destroy_all(struct venus_backend *backend);
+
+VAStatus venus_encode_end_picture_locked(
+    struct venus_backend *backend, struct venus_context *context,
+    const struct venus_config *config);
+VAStatus venus_encode_sync_surface_locked(
+    struct venus_backend *backend, struct venus_surface *surface,
+    int timeout_ms);
+VAStatus venus_encode_sync_buffer_locked(
+    struct venus_backend *backend, struct venus_buffer *buffer,
+    int timeout_ms);
+void venus_encode_close_context(struct venus_context *context);
 
 #endif

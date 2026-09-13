@@ -5,8 +5,9 @@ initially targeting Xiaomi Redmi K20 Pro / Mi 9T Pro (Raphael, SM8150).
 
 ## Current status
 
-**H.264 VLD is validated for progressive 8-bit Baseline at 640x480. Encoding
-and the other decode codecs remain disabled.**
+**H.264 VLD is validated for progressive 8-bit video at 640x480. The
+H.264 EncSlice path is implemented and awaiting end-to-end device validation.
+Other codecs remain disabled.**
 
 The repository currently provides:
 
@@ -24,8 +25,10 @@ The repository currently provides:
   validating queue order, MMAP buffers, source-change events and drain;
 - experimental H.264 Baseline/Main/High VLD config, context, buffer, surface,
   sync and NV12 image-download paths backed by that same session;
-- an isolated H.264 stateful encoder session for validating NV12 input,
-  V4L2 controls, encoded CAPTURE packets and drain before VA integration.
+- a device-validated H.264 stateful encoder session for NV12 input,
+  V4L2 controls, encoded CAPTURE packets and drain;
+- experimental H.264 Baseline/Main/High EncSlice config, context, parameter,
+  coded-buffer, sync and CPU-backed NV12 upload paths using that session.
 
 Debian 13 ships libva 2.22. A driver built against libva 1.20 remains loadable
 because libva searches compatible lower minor-version init symbols.
@@ -34,7 +37,7 @@ because libva searches compatible lower minor-version init symbols.
 
 | Codec | Decode | Encode |
 | --- | --- | --- |
-| H.264 Baseline/Main/High | Baseline validated; Main/High pending | V4L2 session candidate |
+| H.264 Baseline/Main/High | Baseline validated; Main/High pending | V4L2 session validated; VA EncSlice pending |
 | HEVC Main 8-bit | planned | planned |
 | VP8 | planned | planned |
 | VP9 Profile 0 | planned | not exposed |
@@ -96,6 +99,16 @@ sudo ./tests/run-v4l2-h264-encode.sh
 The encoder test generates 30 NV12 frames, encodes them through the project's
 own V4L2 session, drains the device and requires software decoding to recover
 all 30 frames.
+
+Validate the H.264 VA-API encoder path:
+
+```bash
+sudo ./tests/run-vaapi-h264-encode.sh
+```
+
+This uploads 30 NV12 frames into VA surfaces, encodes them through
+`VAEntrypointEncSlice`, maps each `VACodedBufferSegment`, and requires
+software decoding to recover all 30 frames.
 
 Test driver loading after the first codec profile is implemented:
 

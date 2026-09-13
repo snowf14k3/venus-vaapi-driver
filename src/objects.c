@@ -50,6 +50,7 @@ static struct venus_buffer *allocate_buffer(
             .capacity_elements = num_elements,
             .num_elements = num_elements,
             .owns_data = owns_data,
+            .source_surface_id = VA_INVALID_ID,
         };
 
         if (owns_data) {
@@ -152,6 +153,9 @@ static VAStatus create_surfaces_locked(
         surface->height = height;
         surface->fourcc = fourcc;
         surface->capacity = capacity;
+        surface->data_size = capacity;
+        surface->ready = true;
+        surface->coded_buffer_id = VA_INVALID_ID;
         surface->context_id = VA_INVALID_ID;
         created[created_count] = surface;
         surface_ids[created_count] = surface->id;
@@ -273,6 +277,11 @@ static VAStatus backend_create_buffer(
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
     }
 
+    if (type == VAEncCodedBufferType) {
+        buffer->coded_segment.buf = buffer->data;
+        buffer->coded_segment.next = NULL;
+    }
+
     *buffer_id = buffer->id;
     venus_backend_log(backend,
                       "create-buffer id=0x%x context=0x%x type=%d elements=%u size=%u",
@@ -297,7 +306,8 @@ static VAStatus backend_set_num_elements(
 
     pthread_mutex_lock(&backend->mutex);
     buffer = venus_backend_find_buffer(backend, buffer_id);
-    if (!buffer || !buffer->owns_data) {
+    if (!buffer || !buffer->owns_data ||
+        buffer->type == VAEncCodedBufferType) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_BUFFER;
     }
@@ -343,7 +353,9 @@ static VAStatus backend_map_buffer(VADriverContextP context,
         return VA_STATUS_ERROR_INVALID_BUFFER;
     }
 
-    *mapped = buffer->data;
+    *mapped = buffer->type == VAEncCodedBufferType
+                  ? (void *)&buffer->coded_segment
+                  : (void *)buffer->data;
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
 }
@@ -395,6 +407,17 @@ static VAStatus backend_destroy_buffer(VADriverContextP context,
     if (!buffer || buffer_used_by_image(backend, buffer_id)) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_BUFFER;
+    }
+
+    if (buffer->type == VAEncCodedBufferType &&
+        buffer->source_surface_id != VA_INVALID_ID) {
+        struct venus_surface *surface = venus_backend_find_surface(
+            backend, buffer->source_surface_id);
+
+        if (surface && surface->coded_buffer_id == buffer->id) {
+            surface->encode_pending = false;
+            surface->coded_buffer_id = VA_INVALID_ID;
+        }
     }
 
     venus_backend_free_buffer(buffer);
@@ -661,6 +684,10 @@ static VAStatus backend_put_image(
         pthread_mutex_unlock(&backend->mutex);
         return !surface ? VA_STATUS_ERROR_INVALID_SURFACE
                         : VA_STATUS_ERROR_INVALID_IMAGE;
+    }
+    if (surface->encode_pending) {
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_SURFACE_BUSY;
     }
     if (src_x != 0 || src_y != 0 || dst_x != 0 || dst_y != 0 ||
         src_width != surface->width ||

@@ -20,8 +20,8 @@ int main(void)
     assert(venus_driver_init(&context) == VA_STATUS_SUCCESS);
     assert(context.pDriverData != NULL);
     assert(context.max_profiles == 3);
-    assert(context.max_entrypoints == 1);
-    assert(context.max_attributes == 4);
+    assert(context.max_entrypoints == 2);
+    assert(context.max_attributes == 8);
     assert(context.str_vendor != NULL);
 
     assert(vtable.vaTerminate != NULL);
@@ -44,6 +44,7 @@ int main(void)
     assert(vtable.vaRenderPicture != NULL);
     assert(vtable.vaEndPicture != NULL);
     assert(vtable.vaSyncSurface != NULL);
+    assert(vtable.vaSyncBuffer != NULL);
     assert(vtable.vaQuerySurfaceStatus != NULL);
     assert(vtable.vaQueryImageFormats != NULL);
     assert(vtable.vaCreateImage != NULL);

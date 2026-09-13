@@ -282,6 +282,16 @@ static VAStatus venus_sync_surface2(VADriverContextP context,
     return venus_sync_surface(context, surface);
 }
 
+static VAStatus venus_sync_buffer(VADriverContextP context,
+                                  VABufferID buffer_id,
+                                  uint64_t timeout_ns)
+{
+    (void)context;
+    (void)buffer_id;
+    (void)timeout_ns;
+    return VA_STATUS_ERROR_UNIMPLEMENTED;
+}
+
 static VAStatus venus_query_surface_status(VADriverContextP context,
                                            VASurfaceID surface,
                                            VASurfaceStatus *status)
@@ -720,4 +730,5 @@ void venus_vtable_init(struct VADriverVTable *vtable)
     vtable->vaReleaseBufferHandle = venus_release_buffer_handle;
     vtable->vaExportSurfaceHandle = venus_export_surface_handle;
     vtable->vaSyncSurface2 = venus_sync_surface2;
+    vtable->vaSyncBuffer = venus_sync_buffer;
 }

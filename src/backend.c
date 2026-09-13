@@ -50,6 +50,15 @@ VAStatus venus_backend_status_from_errno(int status)
     }
 }
 
+VAStatus venus_backend_encode_status_from_errno(int status)
+{
+    VAStatus common = venus_backend_status_from_errno(status);
+
+    return common == VA_STATUS_ERROR_DECODING_ERROR
+               ? VA_STATUS_ERROR_ENCODING_ERROR
+               : common;
+}
+
 bool venus_backend_h264_profile(VAProfile profile)
 {
     return profile == VAProfileH264ConstrainedBaseline ||
@@ -65,6 +74,17 @@ bool venus_backend_h264_vld_supported(const struct venus_backend *backend,
            entrypoint == VAEntrypointVLD &&
            venus_capabilities_has(&backend->capabilities,
                                   VENUS_ROLE_DECODER,
+                                  VENUS_CODEC_H264);
+}
+
+bool venus_backend_h264_enc_supported(const struct venus_backend *backend,
+                                      VAProfile profile,
+                                      VAEntrypoint entrypoint)
+{
+    return backend && venus_backend_h264_profile(profile) &&
+           entrypoint == VAEntrypointEncSlice &&
+           venus_capabilities_has(&backend->capabilities,
+                                  VENUS_ROLE_ENCODER,
                                   VENUS_CODEC_H264);
 }
 
@@ -178,6 +198,9 @@ static VAStatus backend_query_profiles(VADriverContextP context,
     pthread_mutex_lock(&backend->mutex);
     if (venus_capabilities_has(&backend->capabilities,
                                VENUS_ROLE_DECODER,
+                               VENUS_CODEC_H264) ||
+        venus_capabilities_has(&backend->capabilities,
+                               VENUS_ROLE_ENCODER,
                                VENUS_CODEC_H264)) {
         if (profiles) {
             profiles[0] = VAProfileH264ConstrainedBaseline;
@@ -203,16 +226,30 @@ static VAStatus backend_query_entrypoints(VADriverContextP context,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
     pthread_mutex_lock(&backend->mutex);
-    if (!venus_backend_h264_vld_supported(
-            backend, profile, VAEntrypointVLD)) {
+    if (!venus_backend_h264_profile(profile)) {
         pthread_mutex_unlock(&backend->mutex);
         *num_entrypoints = 0;
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
     }
 
-    if (entrypoints)
-        entrypoints[0] = VAEntrypointVLD;
-    *num_entrypoints = 1;
+    *num_entrypoints = 0;
+    if (venus_backend_h264_vld_supported(
+            backend, profile, VAEntrypointVLD)) {
+        if (entrypoints)
+            entrypoints[*num_entrypoints] = VAEntrypointVLD;
+        (*num_entrypoints)++;
+    }
+    if (venus_backend_h264_enc_supported(
+            backend, profile, VAEntrypointEncSlice)) {
+        if (entrypoints)
+            entrypoints[*num_entrypoints] = VAEntrypointEncSlice;
+        (*num_entrypoints)++;
+    }
+    if (*num_entrypoints == 0) {
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
+    }
+
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
 }
@@ -231,6 +268,8 @@ static VAStatus backend_get_config_attributes(
 
     pthread_mutex_lock(&backend->mutex);
     if (!venus_backend_h264_vld_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_h264_enc_supported(
             backend, profile, entrypoint)) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -242,7 +281,31 @@ static VAStatus backend_get_config_attributes(
             attributes[index].value = VA_RT_FORMAT_YUV420;
             break;
         case VAConfigAttribDecSliceMode:
-            attributes[index].value = VA_DEC_SLICE_MODE_NORMAL;
+            attributes[index].value =
+                entrypoint == VAEntrypointVLD
+                    ? VA_DEC_SLICE_MODE_NORMAL
+                    : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribRateControl:
+            attributes[index].value =
+                entrypoint == VAEntrypointEncSlice
+                    ? VA_RC_CBR
+                    : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncPackedHeaders:
+            attributes[index].value = VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncMaxRefFrames:
+            attributes[index].value =
+                entrypoint == VAEntrypointEncSlice
+                    ? 1
+                    : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncMaxSlices:
+            attributes[index].value =
+                entrypoint == VAEntrypointEncSlice
+                    ? 1
+                    : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribMaxPictureWidth:
             attributes[index].value = VENUS_MAX_WIDTH;
@@ -275,6 +338,8 @@ static VAStatus backend_create_config(
 
     pthread_mutex_lock(&backend->mutex);
     if (!venus_backend_h264_vld_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_h264_enc_supported(
             backend, profile, entrypoint)) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -286,8 +351,21 @@ static VAStatus backend_create_config(
             pthread_mutex_unlock(&backend->mutex);
             return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
         }
-        if (attributes[attribute].type == VAConfigAttribDecSliceMode &&
+        if (entrypoint == VAEntrypointVLD &&
+            attributes[attribute].type == VAConfigAttribDecSliceMode &&
             attributes[attribute].value != VA_DEC_SLICE_MODE_NORMAL) {
+            pthread_mutex_unlock(&backend->mutex);
+            return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+        }
+        if (entrypoint == VAEntrypointEncSlice &&
+            attributes[attribute].type == VAConfigAttribRateControl &&
+            attributes[attribute].value != VA_RC_CBR) {
+            pthread_mutex_unlock(&backend->mutex);
+            return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+        }
+        if (entrypoint == VAEntrypointEncSlice &&
+            attributes[attribute].type == VAConfigAttribEncPackedHeaders &&
+            attributes[attribute].value != 0) {
             pthread_mutex_unlock(&backend->mutex);
             return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
         }
@@ -304,6 +382,9 @@ static VAStatus backend_create_config(
             .id = VENUS_CONFIG_BASE | (index + 1),
             .profile = profile,
             .entrypoint = entrypoint,
+            .rate_control = entrypoint == VAEntrypointEncSlice
+                                ? VA_RC_CBR
+                                : 0,
         };
         *config_id = config->id;
         venus_backend_log(backend, "create-config id=0x%x profile=%d entrypoint=%d",
@@ -353,6 +434,7 @@ static VAStatus backend_query_config_attributes(
 {
     struct venus_backend *backend = venus_backend_from_context(context);
     struct venus_config *config;
+    int required;
 
     if (!backend || !profile || !entrypoint || !num_attributes)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
@@ -366,12 +448,28 @@ static VAStatus backend_query_config_attributes(
 
     *profile = config->profile;
     *entrypoint = config->entrypoint;
-    if (attributes)
-        attributes[0] = (VAConfigAttrib) {
-            .type = VAConfigAttribRTFormat,
-            .value = VA_RT_FORMAT_YUV420,
+    required = config->entrypoint == VAEntrypointEncSlice ? 2 : 1;
+    if (!attributes) {
+        *num_attributes = required;
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_SUCCESS;
+    }
+    if (*num_attributes < required) {
+        *num_attributes = required;
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+    }
+
+    attributes[0] = (VAConfigAttrib) {
+        .type = VAConfigAttribRTFormat,
+        .value = VA_RT_FORMAT_YUV420,
+    };
+    if (required == 2)
+        attributes[1] = (VAConfigAttrib) {
+            .type = VAConfigAttribRateControl,
+            .value = config->rate_control,
         };
-    *num_attributes = 1;
+    *num_attributes = required;
 
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;

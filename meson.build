@@ -1,7 +1,7 @@
 project(
   'venus-vaapi-driver',
   'c',
-  version: '0.2.0',
+  version: '0.3.0',
   license: 'MIT',
   meson_version: '>=1.2.0',
   default_options: [
@@ -42,9 +42,10 @@ encoder_sources = files(
   'src/v4l2_encoder.c',
 )
 
-driver_sources = common_sources + codec_sources + stateful_sources + files(
+driver_sources = common_sources + codec_sources + stateful_sources + encoder_sources + files(
   'src/backend.c',
   'src/decode.c',
+  'src/encode.c',
   'src/driver.c',
   'src/objects.c',
   'src/va_stubs.c',

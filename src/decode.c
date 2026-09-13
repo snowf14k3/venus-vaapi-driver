@@ -133,27 +133,33 @@ static VAStatus backend_create_context(
         return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
     }
 
-    decoder_config = (struct venus_v4l2_decoder_config) {
-        .device = backend->capabilities.decoder_path,
-        .coded_format = V4L2_PIX_FMT_H264,
-        .width = (uint32_t)picture_width,
-        .height = (uint32_t)picture_height,
-        .output_buffer_size = 2u * 1024u * 1024u,
-        .output_buffers = 4,
-        .capture_buffers = 16,
-    };
+    if (config->entrypoint == VAEntrypointVLD) {
+        decoder_config = (struct venus_v4l2_decoder_config) {
+            .device = backend->capabilities.decoder_path,
+            .coded_format = V4L2_PIX_FMT_H264,
+            .width = (uint32_t)picture_width,
+            .height = (uint32_t)picture_height,
+            .output_buffer_size = 2u * 1024u * 1024u,
+            .output_buffers = 4,
+            .capture_buffers = 16,
+        };
 
-    status = venus_v4l2_decoder_open(
-        &decoder_config, &context->decoder, &decoder_error);
-    if (status < 0) {
-        venus_backend_log(backend,
-                          "create-context decoder-open failed operation=%s error=%d",
-                          decoder_error.operation[0]
-                              ? decoder_error.operation
-                              : "none",
-                          -status);
+        status = venus_v4l2_decoder_open(
+            &decoder_config, &context->decoder, &decoder_error);
+        if (status < 0) {
+            venus_backend_log(
+                backend,
+                "create-context decoder-open failed operation=%s error=%d",
+                decoder_error.operation[0]
+                    ? decoder_error.operation
+                    : "none",
+                -status);
+            pthread_mutex_unlock(&backend->mutex);
+            return venus_backend_status_from_errno(status);
+        }
+    } else if (config->entrypoint != VAEntrypointEncSlice) {
         pthread_mutex_unlock(&backend->mutex);
-        return venus_backend_status_from_errno(status);
+        return VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT;
     }
 
     context->used = true;
@@ -189,13 +195,17 @@ static void destroy_context_locked(struct venus_backend *backend,
         return;
 
     venus_v4l2_decoder_close(context->decoder);
+    venus_encode_close_context(context);
     clear_pending(context);
     destroy_context_buffers(backend, context->id);
 
     for (index = 0; index < VENUS_MAX_SURFACES; index++) {
         if (backend->surfaces[index].used &&
-            backend->surfaces[index].context_id == context->id)
+            backend->surfaces[index].context_id == context->id) {
             backend->surfaces[index].context_id = VA_INVALID_ID;
+            backend->surfaces[index].encode_pending = false;
+            backend->surfaces[index].coded_buffer_id = VA_INVALID_ID;
+        }
     }
 
     memset(context, 0, sizeof(*context));
@@ -230,6 +240,7 @@ static VAStatus backend_begin_picture(VADriverContextP driver_context,
     struct venus_backend *backend =
         venus_backend_from_context(driver_context);
     struct venus_context *context;
+    struct venus_config *config;
     struct venus_surface *surface;
 
     if (!backend)
@@ -242,25 +253,37 @@ static VAStatus backend_begin_picture(VADriverContextP driver_context,
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_CONTEXT;
     }
+    config = venus_backend_find_config(backend, context->config_id);
+    if (!config) {
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_INVALID_CONFIG;
+    }
     if (!surface || surface->width != context->width ||
         surface->height != context->height) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
-    if (context->in_picture) {
+    if (context->in_picture || surface->encode_pending) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+    if (config->entrypoint == VAEntrypointEncSlice &&
+        (!surface->ready || surface->data_size == 0)) {
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
     context->in_picture = true;
     context->target = render_target;
     context->pending_count = 0;
     surface->context_id = context_id;
-    surface->ready = false;
-    surface->data_size = 0;
+    if (config->entrypoint == VAEntrypointVLD) {
+        surface->ready = false;
+        surface->data_size = 0;
+    }
     venus_backend_log(backend,
-                      "begin-picture context=0x%x surface=0x%x",
-                      context_id, render_target);
+                      "begin-picture context=0x%x surface=0x%x entrypoint=%d",
+                      context_id, render_target, config->entrypoint);
 
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
@@ -412,6 +435,26 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
         goto finish;
     }
 
+    if (config->entrypoint == VAEntrypointEncSlice) {
+        VAStatus encode_status = venus_encode_end_picture_locked(
+            backend, context, config);
+
+        clear_pending(context);
+        context->in_picture = false;
+        context->target = VA_INVALID_ID;
+        if (encode_status != VA_STATUS_SUCCESS)
+            venus_backend_log(
+                backend,
+                "end-picture encode failed context=0x%x status=%d",
+                context_id, encode_status);
+        pthread_mutex_unlock(&backend->mutex);
+        return encode_status;
+    }
+    if (config->entrypoint != VAEntrypointVLD) {
+        status = -ENOTSUP;
+        goto finish;
+    }
+
     status = collect_h264_buffers(
         backend, context, &picture, batches, &num_batches,
         &access_unit_capacity);
@@ -459,6 +502,9 @@ static VAStatus sync_surface_locked(struct venus_backend *backend,
     struct venus_context *context;
     int64_t deadline;
 
+    if (surface->encode_pending)
+        return venus_encode_sync_surface_locked(
+            backend, surface, timeout_ms);
     if (surface->ready)
         return VA_STATUS_SUCCESS;
 
@@ -542,6 +588,42 @@ static VAStatus backend_sync_surface2(
     return status;
 }
 
+static VAStatus backend_sync_buffer(
+    VADriverContextP driver_context, VABufferID buffer_id,
+    uint64_t timeout_ns)
+{
+    struct venus_backend *backend =
+        venus_backend_from_context(driver_context);
+    struct venus_buffer *buffer;
+    uint64_t timeout_ms;
+    VAStatus status;
+
+    if (!backend)
+        return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+    timeout_ms = timeout_ns == VA_TIMEOUT_INFINITE
+                     ? VENUS_SYNC_TIMEOUT_MS
+                     : (timeout_ns + 999999u) / 1000000u;
+    if (timeout_ms > INT_MAX)
+        timeout_ms = INT_MAX;
+
+    pthread_mutex_lock(&backend->mutex);
+    buffer = venus_backend_find_buffer(backend, buffer_id);
+    if (!buffer || buffer->type != VAEncCodedBufferType) {
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_INVALID_BUFFER;
+    }
+
+    status = venus_encode_sync_buffer_locked(
+        backend, buffer, (int)timeout_ms);
+    venus_backend_log(
+        backend,
+        "sync-buffer id=0x%x status=%d bytes=%zu",
+        buffer_id, status, buffer->coded_size);
+    pthread_mutex_unlock(&backend->mutex);
+    return status;
+}
+
 static VAStatus backend_query_surface_status(
     VADriverContextP driver_context, VASurfaceID surface_id,
     VASurfaceStatus *surface_status)
@@ -561,7 +643,9 @@ static VAStatus backend_query_surface_status(
     }
 
     *surface_status =
-        surface->ready ? VASurfaceReady : VASurfaceRendering;
+        surface->ready && !surface->encode_pending
+            ? VASurfaceReady
+            : VASurfaceRendering;
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
 }
@@ -583,5 +667,6 @@ void venus_decode_fill_vtable(struct VADriverVTable *vtable)
     vtable->vaEndPicture = backend_end_picture;
     vtable->vaSyncSurface = backend_sync_surface;
     vtable->vaSyncSurface2 = backend_sync_surface2;
+    vtable->vaSyncBuffer = backend_sync_buffer;
     vtable->vaQuerySurfaceStatus = backend_query_surface_status;
 }
