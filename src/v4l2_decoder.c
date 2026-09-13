@@ -477,7 +477,12 @@ static int dequeue_events(struct venus_v4l2_decoder *decoder,
         struct v4l2_event event = { 0 };
 
         if (xioctl(decoder->fd, VIDIOC_DQEVENT, &event) < 0) {
-            if (errno == EAGAIN)
+            /*
+             * The qcom-venus event queue reports ENOENT after the last
+             * pending event, while other V4L2 drivers use EAGAIN. Both
+             * mean that the nonblocking queue is currently empty.
+             */
+            if (errno == EAGAIN || errno == ENOENT)
                 return 0;
             return decoder_error(decoder, "VIDIOC_DQEVENT");
         }
