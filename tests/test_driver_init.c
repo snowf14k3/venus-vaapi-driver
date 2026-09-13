@@ -17,6 +17,7 @@ int main(void)
     context.vtable = &vtable;
 
     assert(setenv("VENUS_VAAPI_ALLOW_NO_DEVICE", "1", 1) == 0);
+    assert(setenv("VENUS_VAAPI_FORCE_NO_DEVICE", "1", 1) == 0);
     assert(venus_driver_init(&context) == VA_STATUS_SUCCESS);
     assert(context.pDriverData != NULL);
     assert(context.max_profiles == 3);

@@ -20,6 +20,7 @@ VAStatus venus_driver_init(VADriverContextP context)
 {
     struct venus_capabilities capabilities;
     const char *allow_no_device;
+    const char *force_no_device;
     VAStatus status;
     void *backend = NULL;
     int result;
@@ -27,11 +28,20 @@ VAStatus venus_driver_init(VADriverContextP context)
     if (!context || !context->vtable)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
-    result = venus_v4l2_probe(&capabilities);
-    allow_no_device = getenv("VENUS_VAAPI_ALLOW_NO_DEVICE");
-    if (result < 0 &&
-        (!allow_no_device || strcmp(allow_no_device, "1") != 0))
-        return VA_STATUS_ERROR_OPERATION_FAILED;
+    force_no_device = getenv("VENUS_VAAPI_FORCE_NO_DEVICE");
+    if (force_no_device &&
+        strcmp(force_no_device, "1") == 0) {
+        venus_capabilities_reset(&capabilities);
+        result = 0;
+    } else {
+        result = venus_v4l2_probe(&capabilities);
+        allow_no_device =
+            getenv("VENUS_VAAPI_ALLOW_NO_DEVICE");
+        if (result < 0 &&
+            (!allow_no_device ||
+             strcmp(allow_no_device, "1") != 0))
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
 
     status = venus_backend_create(&capabilities, &backend);
     if (status != VA_STATUS_SUCCESS)

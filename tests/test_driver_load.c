@@ -42,6 +42,7 @@ int main(int argc, char **argv)
     context.vtable = &vtable;
 
     if (setenv("VENUS_VAAPI_ALLOW_NO_DEVICE", "1", 1) != 0 ||
+        setenv("VENUS_VAAPI_FORCE_NO_DEVICE", "1", 1) != 0 ||
         init(&context) != VA_STATUS_SUCCESS ||
         !context.pDriverData ||
         !vtable.vaQueryConfigProfiles ||
