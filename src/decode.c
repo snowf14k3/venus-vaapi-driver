@@ -25,15 +25,21 @@ static int64_t monotonic_milliseconds(void)
            timestamp.tv_nsec / 1000000;
 }
 
-static void clear_pending(struct venus_backend *backend,
-                          struct venus_context *context)
+static void clear_pending(struct venus_context *context)
 {
-    size_t index;
-
-    for (index = 0; index < context->pending_count; index++)
-        venus_backend_free_buffer(venus_backend_find_buffer(
-            backend, context->pending[index]));
     context->pending_count = 0;
+}
+
+static void destroy_context_buffers(struct venus_backend *backend,
+                                    VAContextID context_id)
+{
+    unsigned int index;
+
+    for (index = 0; index < VENUS_MAX_BUFFERS; index++) {
+        if (backend->buffers[index].used &&
+            backend->buffers[index].context_id == context_id)
+            venus_backend_free_buffer(&backend->buffers[index]);
+    }
 }
 
 static int store_frame(const struct venus_v4l2_frame *frame,
@@ -183,7 +189,8 @@ static void destroy_context_locked(struct venus_backend *backend,
         return;
 
     venus_v4l2_decoder_close(context->decoder);
-    clear_pending(backend, context);
+    clear_pending(context);
+    destroy_context_buffers(backend, context->id);
 
     for (index = 0; index < VENUS_MAX_SURFACES; index++) {
         if (backend->surfaces[index].used &&
@@ -433,7 +440,7 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
 
 finish:
     free(access_unit);
-    clear_pending(backend, context);
+    clear_pending(context);
     context->in_picture = false;
     context->target = VA_INVALID_ID;
     if (status < 0)
