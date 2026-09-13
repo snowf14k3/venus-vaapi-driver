@@ -15,6 +15,7 @@ int main(void)
     uint8_t source[4 * 4 * 3 / 2];
     uint8_t destination[384];
     size_t packed_size;
+    size_t compressed_size;
     size_t index;
 
     memset(source, 0x5a, sizeof(source));
@@ -34,6 +35,15 @@ int main(void)
     assert(memcmp(destination + 8 * 33,
                   source + 4 * 5, 4) == 0);
 
+    assert(venus_v4l2_encoder_compressed_size(
+               640, 480, &compressed_size) == 0);
+    assert(compressed_size == 233472);
+    assert(venus_v4l2_encoder_compressed_size(
+               2340, 1080, &compressed_size) == 0);
+    assert(compressed_size == 1933312);
+    assert(venus_v4l2_encoder_compressed_size(
+               0, 1080, &compressed_size) == -EINVAL);
+
     memset(&error, 0x5a, sizeof(error));
     assert(venus_v4l2_encoder_open(
                &config, &encoder, &error) == -EINVAL);
@@ -46,6 +56,7 @@ int main(void)
     assert(venus_v4l2_encoder_pump(
                NULL, 0, NULL, NULL, NULL) == -EINVAL);
     assert(venus_v4l2_encoder_stop(NULL) == -EINVAL);
+    assert(venus_v4l2_encoder_force_keyframe(NULL) == -EINVAL);
     assert(strcmp(venus_v4l2_encoder_last_operation(NULL), "none") == 0);
     assert(venus_v4l2_encoder_output_count(NULL) == 0);
     assert(venus_v4l2_encoder_capture_count(NULL) == 0);

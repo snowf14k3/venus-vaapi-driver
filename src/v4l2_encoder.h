@@ -55,6 +55,10 @@ int venus_v4l2_encoder_pack_nv12(
     uint32_t destination_stride, uint32_t destination_scanlines,
     const uint8_t *source, uint32_t width, uint32_t height,
     size_t *packed_size);
+int venus_v4l2_encoder_compressed_size(
+    uint32_t width, uint32_t height, size_t *size);
+int venus_v4l2_encoder_force_keyframe(
+    struct venus_v4l2_encoder *encoder);
 int venus_v4l2_encoder_pump(struct venus_v4l2_encoder *encoder,
                             int timeout_ms,
                             venus_v4l2_packet_callback callback,

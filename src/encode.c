@@ -468,8 +468,7 @@ static int store_packet(const struct venus_v4l2_packet *packet,
 static int open_encoder(
     struct venus_backend *backend, struct venus_context *context,
     const struct venus_config *config,
-    const struct venus_h264_encode_parameters *parameters,
-    size_t coded_capacity)
+    const struct venus_h264_encode_parameters *parameters)
 {
     struct venus_v4l2_encoder_config encoder_config;
     struct venus_v4l2_error error;
@@ -481,6 +480,7 @@ static int open_encoder(
     uint32_t encode_width;
     uint32_t encode_height;
     uint32_t bitrate_mode;
+    size_t v4l2_capture_size;
     int32_t qp;
     uint32_t gop_size = 0;
     int status;
@@ -518,6 +518,10 @@ static int open_encoder(
     if ((encode_width + 15u) / 16u * 16u != context->width ||
         (encode_height + 15u) / 16u * 16u != context->height)
         return -EINVAL;
+    status = venus_v4l2_encoder_compressed_size(
+        encode_width, encode_height, &v4l2_capture_size);
+    if (status < 0)
+        return status;
 
     if (bitrate == 0)
         bitrate = parameters->sequence->bits_per_second;
@@ -606,7 +610,7 @@ static int open_encoder(
         .h264_transform_8x8 =
             parameters->picture->
                 pic_fields.bits.transform_8x8_mode_flag,
-        .capture_buffer_size = coded_capacity,
+        .capture_buffer_size = v4l2_capture_size,
         .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
         .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
     };
@@ -742,8 +746,7 @@ VAStatus venus_encode_end_picture_locked(
 
     if (!context->encoder) {
         status = open_encoder(
-            backend, context, config, &parameters,
-            coded_capacity);
+            backend, context, config, &parameters);
         if (status < 0)
             return venus_backend_encode_status_from_errno(status);
     } else if (parameters.sequence) {
@@ -756,6 +759,20 @@ VAStatus venus_encode_end_picture_locked(
             width != context->encode_width ||
             height != context->encode_height)
             return VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+
+    if (context->encode_sequence > 0 &&
+        parameters.picture->pic_fields.bits.idr_pic_flag) {
+        status = venus_v4l2_encoder_force_keyframe(context->encoder);
+        if (status < 0) {
+            venus_backend_log(
+                backend,
+                "force-keyframe failed context=0x%x operation=%s error=%d",
+                context->id,
+                venus_v4l2_encoder_last_operation(context->encoder),
+                -status);
+            return venus_backend_encode_status_from_errno(status);
+        }
     }
 
     status = venus_surface_begin_cpu_read(surface);

@@ -150,6 +150,30 @@ static int set_control(struct venus_v4l2_encoder *encoder,
     return 0;
 }
 
+int venus_v4l2_encoder_compressed_size(
+    uint32_t width, uint32_t height, size_t *size)
+{
+    size_t aligned_width;
+    size_t aligned_height;
+    size_t pixels;
+    size_t compressed;
+
+    if (!width || !height || !size)
+        return -EINVAL;
+    aligned_width = ((size_t)width + 31u) & ~(size_t)31u;
+    aligned_height = ((size_t)height + 31u) & ~(size_t)31u;
+    if (aligned_width > SIZE_MAX / aligned_height)
+        return -EOVERFLOW;
+    pixels = aligned_width * aligned_height;
+    if (pixels > SIZE_MAX / 3u)
+        return -EOVERFLOW;
+    compressed = pixels * 3u / 4u;
+    if (compressed > SIZE_MAX - 4095u)
+        return -EOVERFLOW;
+    *size = (compressed + 4095u) & ~(size_t)4095u;
+    return 0;
+}
+
 static int set_parameters(
     struct venus_v4l2_encoder *encoder,
     const struct venus_v4l2_encoder_config *config)
@@ -159,6 +183,12 @@ static int set_parameters(
     };
     int status;
 
+    status = set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_B_FRAMES,
+        0, "S_CTRL(B_FRAMES)");
+    if (status < 0)
+        return status;
+
     parameters.parm.output.timeperframe.numerator = 1;
     parameters.parm.output.timeperframe.denominator =
         config->frames_per_second;
@@ -166,19 +196,22 @@ static int set_parameters(
         return encoder_error(encoder, "VIDIOC_S_PARM(OUTPUT)");
 
     status = set_control(
-        encoder, V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
-        config->rate_control_enabled ? 1 : 0,
-        "S_CTRL(FRAME_RC_ENABLE)");
+        encoder, V4L2_CID_MPEG_VIDEO_HEADER_MODE,
+        V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE,
+        "S_CTRL(HEADER_MODE)");
     if (status < 0)
         return status;
 
     if (config->rate_control_enabled) {
-        status = set_control(
-            encoder, V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
-            (int32_t)config->bitrate_mode,
-            "S_CTRL(BITRATE_MODE)");
-        if (status < 0)
-            return status;
+        if (config->bitrate_mode !=
+            V4L2_MPEG_VIDEO_BITRATE_MODE_VBR) {
+            status = set_control(
+                encoder, V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                (int32_t)config->bitrate_mode,
+                "S_CTRL(BITRATE_MODE)");
+            if (status < 0)
+                return status;
+        }
         status = set_control(
             encoder, V4L2_CID_MPEG_VIDEO_BITRATE,
             (int32_t)config->bitrate,
@@ -201,20 +234,32 @@ static int set_parameters(
     }
 
     status = set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
+        config->rate_control_enabled ? 1 : 0,
+        "S_CTRL(FRAME_RC_ENABLE)");
+    if (status < 0)
+        return status;
+
+    status = set_control(
         encoder, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
         (int32_t)config->gop_size, "S_CTRL(GOP_SIZE)");
     if (status < 0)
         return status;
 
     status = set_control(
-        encoder, V4L2_CID_MPEG_VIDEO_B_FRAMES,
-        0, "S_CTRL(B_FRAMES)");
+        encoder, V4L2_CID_MPEG_VIDEO_H264_PROFILE,
+        (int32_t)config->h264_profile, "S_CTRL(H264_PROFILE)");
     if (status < 0)
         return status;
 
     status = set_control(
-        encoder, V4L2_CID_MPEG_VIDEO_H264_PROFILE,
-        (int32_t)config->h264_profile, "S_CTRL(H264_PROFILE)");
+        encoder, V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
+        1, "S_CTRL(H264_MIN_QP)");
+    if (status < 0)
+        return status;
+    status = set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
+        51, "S_CTRL(H264_MAX_QP)");
     if (status < 0)
         return status;
 
@@ -389,6 +434,15 @@ static void stream_off(struct venus_v4l2_encoder *encoder,
         xioctl(encoder->fd, VIDIOC_STREAMOFF, &type);
 }
 
+static void subscribe_eos(struct venus_v4l2_encoder *encoder)
+{
+    struct v4l2_event_subscription subscription = {
+        .type = V4L2_EVENT_EOS,
+    };
+
+    xioctl(encoder->fd, VIDIOC_SUBSCRIBE_EVENT, &subscription);
+}
+
 int venus_v4l2_encoder_open(
     const struct venus_v4l2_encoder_config *config,
     struct venus_v4l2_encoder **result,
@@ -452,10 +506,6 @@ int venus_v4l2_encoder_open(
     status = set_capture_format(encoder, config);
     if (status < 0)
         goto fail;
-    status = set_parameters(encoder, config);
-    if (status < 0)
-        goto fail;
-
     status = request_and_map(
         encoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
         config->output_buffers, &encoder->output,
@@ -474,6 +524,11 @@ int venus_v4l2_encoder_open(
         if (status < 0)
             goto fail;
     }
+
+    subscribe_eos(encoder);
+    status = set_parameters(encoder, config);
+    if (status < 0)
+        goto fail;
 
     *result = encoder;
     return 0;
@@ -747,9 +802,11 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
         return -EOVERFLOW;
 
     buffer.index = (unsigned int)index;
+    buffer.field = encoder->output_format.field;
     buffer.timestamp.tv_sec = (long)(tag / 1000000u);
     buffer.timestamp.tv_usec = (long)(tag % 1000000u);
     planes[0].bytesused = (uint32_t)packed_size;
+    planes[0].data_offset = 0;
     planes[0].length = (uint32_t)encoder->output[index].length;
 
     if (xioctl(encoder->fd, VIDIOC_QBUF, &buffer) < 0) {
@@ -785,6 +842,16 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
     }
 
     return 0;
+}
+
+int venus_v4l2_encoder_force_keyframe(
+    struct venus_v4l2_encoder *encoder)
+{
+    if (!encoder || encoder->fd < 0)
+        return -EINVAL;
+    return set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
+        0, "S_CTRL(FORCE_KEY_FRAME)");
 }
 
 int venus_v4l2_encoder_stop(struct venus_v4l2_encoder *encoder)
