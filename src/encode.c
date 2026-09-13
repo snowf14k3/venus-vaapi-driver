@@ -488,16 +488,16 @@ static int open_encoder(
     if (!parameters->sequence || profile == UINT32_MAX)
         return -EINVAL;
 
-    level = level_to_v4l2(parameters->sequence->level_idc);
-    if (level == UINT32_MAX)
+    if (level_to_v4l2(parameters->sequence->level_idc) == UINT32_MAX)
         return -ENOTSUP;
     /*
-     * IRIS1 accepts lower H.264 level controls but rejects the session
-     * when the first raw buffer activates firmware.  Level 3.1 is the
-     * lowest level validated for this H.264 High encoder path.
+     * Patch 0029 in the Raphael kernel uses the V4L2 Level 1.0 default as
+     * an IRIS1 firmware-auto trigger whenever the active frame exceeds
+     * Level 1 limits.  SM8150 downstream follows the same auto-level
+     * contract.  Validate the VA client's requested level, then let
+     * Venus choose the active wire level.
      */
-    if (level < V4L2_MPEG_VIDEO_H264_LEVEL_3_1)
-        level = V4L2_MPEG_VIDEO_H264_LEVEL_3_1;
+    level = V4L2_MPEG_VIDEO_H264_LEVEL_1_0;
 
     status = venus_encode_h264_dimensions(
         parameters->sequence, &encode_width, &encode_height);
@@ -625,7 +625,7 @@ static int open_encoder(
 
     venus_backend_log(
         backend,
-        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u output=%u capture=%u",
+        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u(auto) size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u output=%u capture=%u",
         context->id, config->profile,
         parameters->sequence->level_idc, level,
         context->encode_width, context->encode_height,

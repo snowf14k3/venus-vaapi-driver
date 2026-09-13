@@ -106,6 +106,8 @@ session messages together with the driver's `encoder-open` and
 - GNOME Remote Desktop uses `VENUS_VAAPI_NATIVE_MODE=1080x2340` to
   translate its macroblock-aligned surfaces back to the Raphael panel's
   visible dimensions in either orientation;
+- H.264 encode level selection uses the IRIS1 firmware-auto contract from
+  Raphael kernel patch 0029;
 - CPU-backed NV12 surfaces for ordinary VAAPI clients and linear DMA-BUF
   surfaces for GNOME's Vulkan renderer;
 - maximum advertised width and height of 4096, subject to the SM8150

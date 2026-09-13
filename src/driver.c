@@ -9,7 +9,7 @@
 #include <string.h>
 
 #define VENUS_VENDOR_STRING \
-    "Qualcomm Venus stateful V4L2 VA-API backend 0.4.4"
+    "Qualcomm Venus stateful V4L2 VA-API backend 0.4.5"
 #define VENUS_INIT_NAME_INNER(major, minor) \
     __vaDriverInit_##major##_##minor
 #define VENUS_INIT_NAME(major, minor) \
