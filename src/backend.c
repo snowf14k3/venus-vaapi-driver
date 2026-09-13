@@ -320,6 +320,12 @@ static VAStatus backend_get_config_attributes(
             attributes[index].value = VA_ATTRIB_NOT_SUPPORTED;
             break;
         }
+
+        venus_backend_log(
+            backend,
+            "config-attribute profile=%d entrypoint=%d type=%u value=0x%x",
+            profile, entrypoint, attributes[index].type,
+            attributes[index].value);
     }
 
     pthread_mutex_unlock(&backend->mutex);
