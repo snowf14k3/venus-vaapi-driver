@@ -5,6 +5,7 @@
 #include "venus/capabilities.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <linux/videodev2.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -103,6 +104,23 @@ int main(void)
                &encoded_height) == 0);
     assert(encoded_width == 1920);
     assert(encoded_height == 1080);
+    encoded_width = 2352;
+    encoded_height = 1088;
+    assert(venus_encode_apply_native_mode(
+               "1080x2340", 2352, 1088,
+               &encoded_width, &encoded_height) == 1);
+    assert(encoded_width == 2340);
+    assert(encoded_height == 1080);
+    encoded_width = 1088;
+    encoded_height = 2352;
+    assert(venus_encode_apply_native_mode(
+               "1080x2340", 1088, 2352,
+               &encoded_width, &encoded_height) == 1);
+    assert(encoded_width == 1080);
+    assert(encoded_height == 2340);
+    assert(venus_encode_apply_native_mode(
+               "invalid", 1088, 2352,
+               &encoded_width, &encoded_height) == -EINVAL);
 
     memset(&context, 0, sizeof(context));
     memset(&vtable, 0, sizeof(vtable));

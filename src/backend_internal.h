@@ -169,6 +169,10 @@ int venus_encode_store_packet_locked(
 int venus_encode_h264_dimensions(
     const VAEncSequenceParameterBufferH264 *sequence,
     uint32_t *width, uint32_t *height);
+int venus_encode_apply_native_mode(
+    const char *native_mode, uint32_t context_width,
+    uint32_t context_height, uint32_t *width,
+    uint32_t *height);
 VAStatus venus_encode_sync_surface_locked(
     struct venus_backend *backend, struct venus_surface *surface,
     int timeout_ms);

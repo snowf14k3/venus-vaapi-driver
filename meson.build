@@ -1,7 +1,7 @@
 project(
   'venus-vaapi-driver',
   'c',
-  version: '0.4.3',
+  version: '0.4.4',
   license: 'MIT',
   meson_version: '>=1.2.0',
   default_options: [

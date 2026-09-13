@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +13,6 @@
 #include <va/va_enc_h264.h>
 
 #define VENUS_ENCODE_OUTPUT_BUFFERS 4u
-#define VENUS_ENCODE_HIGH_RATE_OUTPUT_BUFFERS 16u
 #define VENUS_ENCODE_CAPTURE_BUFFERS 16u
 #define VENUS_ENCODE_DEFAULT_BITRATE 1000000u
 #define VENUS_ENCODE_DEFAULT_FPS 30u
@@ -273,6 +273,43 @@ int venus_encode_h264_dimensions(
     return 0;
 }
 
+int venus_encode_apply_native_mode(
+    const char *native_mode, uint32_t context_width,
+    uint32_t context_height, uint32_t *width,
+    uint32_t *height)
+{
+    unsigned int native_width;
+    unsigned int native_height;
+    char trailing;
+
+    if (!width || !height)
+        return -EINVAL;
+    if (!native_mode || !native_mode[0])
+        return 0;
+    if (sscanf(native_mode, "%ux%u%c", &native_width,
+               &native_height, &trailing) != 2 ||
+        native_width < VENUS_MIN_WIDTH ||
+        native_height < VENUS_MIN_HEIGHT ||
+        native_width > VENUS_MAX_WIDTH ||
+        native_height > VENUS_MAX_HEIGHT ||
+        (native_width & 1u) || (native_height & 1u))
+        return -EINVAL;
+
+    if ((native_width + 15u) / 16u * 16u == context_width &&
+        (native_height + 15u) / 16u * 16u == context_height) {
+        *width = native_width;
+        *height = native_height;
+        return 1;
+    }
+    if ((native_height + 15u) / 16u * 16u == context_width &&
+        (native_width + 15u) / 16u * 16u == context_height) {
+        *width = native_height;
+        *height = native_width;
+        return 1;
+    }
+    return 0;
+}
+
 static uint32_t profile_to_v4l2(VAProfile profile)
 {
     switch (profile) {
@@ -441,7 +478,6 @@ static int open_encoder(
     uint32_t bitrate = parameters->bitrate;
     bool bitrate_supplied;
     uint32_t frames_per_second = parameters->frames_per_second;
-    uint32_t output_buffers;
     uint32_t encode_width;
     uint32_t encode_height;
     uint32_t bitrate_mode;
@@ -467,6 +503,18 @@ static int open_encoder(
         parameters->sequence, &encode_width, &encode_height);
     if (status < 0)
         return status;
+    status = venus_encode_apply_native_mode(
+        getenv("VENUS_VAAPI_NATIVE_MODE"),
+        context->width, context->height,
+        &encode_width, &encode_height);
+    if (status < 0)
+        return status;
+    if (status > 0)
+        venus_backend_log(
+            backend,
+            "native-mode context=%ux%u visible=%ux%u",
+            context->width, context->height,
+            encode_width, encode_height);
     if ((encode_width + 15u) / 16u * 16u != context->width ||
         (encode_height + 15u) / 16u * 16u != context->height)
         return -EINVAL;
@@ -493,10 +541,6 @@ static int open_encoder(
     }
     if (frames_per_second == 0)
         frames_per_second = VENUS_ENCODE_DEFAULT_FPS;
-    output_buffers =
-        frames_per_second > VENUS_ENCODE_DEFAULT_FPS
-            ? VENUS_ENCODE_HIGH_RATE_OUTPUT_BUFFERS
-            : VENUS_ENCODE_OUTPUT_BUFFERS;
 
     if (config->rate_control == VA_RC_CQP &&
         !bitrate_supplied) {
@@ -564,7 +608,7 @@ static int open_encoder(
             parameters->picture->
                 pic_fields.bits.transform_8x8_mode_flag,
         .capture_buffer_size = coded_capacity,
-        .output_buffers = output_buffers,
+        .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
         .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
     };
 
