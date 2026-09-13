@@ -237,17 +237,18 @@ int main(int argc, char **argv)
     printf("access_units=%zu\n", units);
     printf("output_buffers=%u\n",
            venus_v4l2_decoder_output_count(decoder));
+
+    status = venus_annexb_for_each_access_unit(
+        input, input_size, submit_access_unit, &run, NULL);
+    if (status < 0)
+        goto finish;
+
     printf("capture_buffers=%u\n",
            venus_v4l2_decoder_capture_count(decoder));
     printf("capture_format=%ux%u size=%u\n",
            venus_v4l2_decoder_capture_width(decoder),
            venus_v4l2_decoder_capture_height(decoder),
            venus_v4l2_decoder_capture_size(decoder));
-
-    status = venus_annexb_for_each_access_unit(
-        input, input_size, submit_access_unit, &run, NULL);
-    if (status < 0)
-        goto finish;
 
     status = venus_v4l2_decoder_stop(decoder);
     if (status < 0)
@@ -278,9 +279,13 @@ finish:
     printf("eos=%s\n", eos ? "yes" : "no");
 
     if (status < 0) {
+        const char *operation =
+            venus_v4l2_decoder_last_operation(decoder);
+
+        if (status == -ETIMEDOUT && strcmp(operation, "none") == 0)
+            operation = "wait(decoded frames)";
         fprintf(stderr, "FAIL operation=%s error=%s (%d)\n",
-                venus_v4l2_decoder_last_operation(decoder),
-                strerror(-status), -status);
+                operation, strerror(-status), -status);
     } else {
         puts("PASS: V4L2 stateful H.264 decode completed");
     }

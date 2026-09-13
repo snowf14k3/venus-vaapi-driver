@@ -75,10 +75,12 @@ zero-copy presentation.
 ## Stateful session validation
 
 `venus-v4l2-decode` keeps the V4L2 session independent from VA object code. It
-negotiates H.264 OUTPUT and linear NV12 CAPTURE, maps the actual buffer counts
-returned by `VIDIOC_REQBUFS`, queues every capture buffer, tracks source-change
-events, submits one Annex-B access unit per OUTPUT buffer, drains with
-`V4L2_DEC_CMD_STOP`, and writes dequeued frames in display order. The device
+starts only the H.264 OUTPUT queue, submits stream metadata, waits for the
+initial source-change event, then selects linear NV12 and creates the CAPTURE
+queue from the parsed format. It maps the actual buffer counts returned by
+`VIDIOC_REQBUFS`, queues every capture buffer, submits one Annex-B access unit
+per OUTPUT buffer, drains with `V4L2_DEC_CMD_STOP`, and writes dequeued frames
+in display order. The device
 test uses a progressive stream without B frames so queue correctness can be
 established before timestamp-to-surface reordering is introduced.
 

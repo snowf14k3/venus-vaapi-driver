@@ -32,6 +32,9 @@ struct venus_v4l2_decoder {
     bool capture_streaming;
     bool stop_sent;
     unsigned int source_changes;
+    uint32_t requested_width;
+    uint32_t requested_height;
+    unsigned int requested_capture_buffers;
     char last_operation[64];
 };
 
@@ -82,16 +85,20 @@ static int set_output_format(
     return 0;
 }
 
-static int set_capture_format(
-    struct venus_v4l2_decoder *decoder,
-    const struct venus_v4l2_decoder_config *config)
+static int set_capture_format(struct venus_v4l2_decoder *decoder)
 {
     struct v4l2_format format = {
         .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
     };
 
-    format.fmt.pix_mp.width = config->width;
-    format.fmt.pix_mp.height = config->height;
+    if (xioctl(decoder->fd, VIDIOC_G_FMT, &format) < 0)
+        return decoder_error(decoder, "VIDIOC_G_FMT(CAPTURE)");
+
+    if (format.fmt.pix_mp.width == 0)
+        format.fmt.pix_mp.width = decoder->requested_width;
+    if (format.fmt.pix_mp.height == 0)
+        format.fmt.pix_mp.height = decoder->requested_height;
+
     format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
     format.fmt.pix_mp.field = V4L2_FIELD_NONE;
     format.fmt.pix_mp.num_planes = 1;
@@ -101,8 +108,10 @@ static int set_capture_format(
 
     if (format.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12 ||
         format.fmt.pix_mp.num_planes != 1 ||
-        format.fmt.pix_mp.plane_fmt[0].sizeimage == 0)
-        return -EINVAL;
+        format.fmt.pix_mp.plane_fmt[0].sizeimage == 0) {
+        errno = EINVAL;
+        return decoder_error(decoder, "capture format contract");
+    }
 
     decoder->capture_format = format.fmt.pix_mp;
     return 0;
@@ -263,6 +272,35 @@ static void stream_off(struct venus_v4l2_decoder *decoder,
     xioctl(decoder->fd, VIDIOC_STREAMOFF, &type);
 }
 
+static int setup_capture(struct venus_v4l2_decoder *decoder)
+{
+    unsigned int index;
+    int status;
+
+    if (decoder->capture_streaming)
+        return 0;
+
+    status = set_capture_format(decoder);
+    if (status < 0)
+        return status;
+
+    status = request_and_map(
+        decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+        decoder->requested_capture_buffers, &decoder->capture,
+        &decoder->capture_count);
+    if (status < 0)
+        return status;
+
+    for (index = 0; index < decoder->capture_count; index++) {
+        status = queue_capture(decoder, index);
+        if (status < 0)
+            return status;
+    }
+
+    return stream_on(
+        decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+}
+
 static int verify_device(struct venus_v4l2_decoder *decoder)
 {
     struct v4l2_capability capability = { 0 };
@@ -293,7 +331,6 @@ int venus_v4l2_decoder_open(
         .type = V4L2_EVENT_SOURCE_CHANGE,
     };
     struct venus_v4l2_decoder *decoder;
-    unsigned int index;
     int status;
 
     if (error)
@@ -313,6 +350,9 @@ int venus_v4l2_decoder_open(
     if (!decoder)
         return -ENOMEM;
     decoder->fd = -1;
+    decoder->requested_width = config->width;
+    decoder->requested_height = config->height;
+    decoder->requested_capture_buffers = config->capture_buffers;
 
     decoder->fd =
         open(config->device, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -338,10 +378,6 @@ int venus_v4l2_decoder_open(
     if (status < 0)
         goto fail;
 
-    status = set_capture_format(decoder, config);
-    if (status < 0)
-        goto fail;
-
     status = request_and_map(
         decoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
         config->output_buffers, &decoder->output,
@@ -349,26 +385,8 @@ int venus_v4l2_decoder_open(
     if (status < 0)
         goto fail;
 
-    status = request_and_map(
-        decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-        config->capture_buffers, &decoder->capture,
-        &decoder->capture_count);
-    if (status < 0)
-        goto fail;
-
-    for (index = 0; index < decoder->capture_count; index++) {
-        status = queue_capture(decoder, index);
-        if (status < 0)
-            goto fail;
-    }
-
     status = stream_on(
         decoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-    if (status < 0)
-        goto fail;
-
-    status = stream_on(
-        decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
     if (status < 0)
         goto fail;
 
@@ -416,6 +434,9 @@ static int dequeue_capture(struct venus_v4l2_decoder *decoder,
                            void *opaque, bool *end_of_stream,
                            bool *made_progress)
 {
+    if (!decoder->capture_streaming)
+        return 0;
+
     for (;;) {
         struct v4l2_plane planes[VIDEO_MAX_PLANES] = { 0 };
         struct v4l2_buffer buffer = {
@@ -490,22 +511,35 @@ static int dequeue_events(struct venus_v4l2_decoder *decoder,
         *made_progress = true;
         if (event.type == V4L2_EVENT_SOURCE_CHANGE &&
             event.u.src_change.changes & V4L2_EVENT_SRC_CH_RESOLUTION) {
-            struct v4l2_format format = {
-                .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-            };
+            int status;
 
             decoder->source_changes++;
-            if (xioctl(decoder->fd, VIDIOC_G_FMT, &format) < 0)
-                return decoder_error(
-                    decoder, "VIDIOC_G_FMT(CAPTURE source-change)");
+            if (!decoder->capture_streaming) {
+                status = setup_capture(decoder);
+                if (status < 0)
+                    return status;
+            } else {
+                struct v4l2_format format = {
+                    .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                };
 
-            if (format.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12 ||
-                format.fmt.pix_mp.num_planes != 1 ||
-                format.fmt.pix_mp.plane_fmt[0].sizeimage >
-                    decoder->capture[0].length)
-                return -EOVERFLOW;
+                if (xioctl(decoder->fd, VIDIOC_G_FMT, &format) < 0)
+                    return decoder_error(
+                        decoder,
+                        "VIDIOC_G_FMT(CAPTURE source-change)");
 
-            decoder->capture_format = format.fmt.pix_mp;
+                if (format.fmt.pix_mp.pixelformat !=
+                        V4L2_PIX_FMT_NV12 ||
+                    format.fmt.pix_mp.num_planes != 1 ||
+                    format.fmt.pix_mp.plane_fmt[0].sizeimage >
+                        decoder->capture[0].length) {
+                    errno = EOVERFLOW;
+                    return decoder_error(
+                        decoder, "dynamic capture format");
+                }
+
+                decoder->capture_format = format.fmt.pix_mp;
+            }
         }
     }
 }
