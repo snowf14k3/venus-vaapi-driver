@@ -17,9 +17,15 @@ struct venus_v4l2_encoder_config {
     uint32_t height;
     uint32_t frames_per_second;
     uint32_t bitrate;
+    bool rate_control_enabled;
+    uint32_t bitrate_mode;
+    uint32_t h264_i_qp;
+    uint32_t h264_p_qp;
     uint32_t gop_size;
     uint32_t h264_profile;
     uint32_t h264_level;
+    uint32_t h264_entropy_mode;
+    uint32_t h264_transform_8x8;
     size_t capture_buffer_size;
     unsigned int output_buffers;
     unsigned int capture_buffers;

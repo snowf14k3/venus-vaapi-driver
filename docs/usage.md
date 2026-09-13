@@ -78,13 +78,35 @@ It tests 640x480, 720p, 1080p, 1080x2340 portrait,
 software-decoded and VAAPI-decoded; the decoded frame hashes, frame counts
 and visible dimensions must match.
 
+## GNOME Remote Desktop
+
+GNOME Remote Desktop 48 requires H.264 High EncSlice, CQP, packed sequence,
+picture, slice and raw-data headers, and exportable linear NV12 surfaces.
+Install the compatibility candidate and restart the active user service:
+
+```bash
+RDP_USER=user ./scripts/install-gnome-rdp.sh
+```
+
+Reconnect the RDP client, then verify the live encoder path:
+
+```bash
+./scripts/check-gnome-rdp.sh
+```
+
+A passing result requires GNOME's successful VAAPI initialization and encode
+session messages together with the driver's `encoder-open` and
+`encoded buffer` traces.
+
 ## Current limits
 
 - progressive H.264 8-bit encoding and decoding;
-- CBR encoding with no B frames;
-- CPU-backed NV12 VA surfaces;
+- CBR and CQP encoding with no B frames;
+- CPU-backed NV12 surfaces for ordinary VAAPI clients and linear DMA-BUF
+  surfaces for GNOME's Vulkan renderer;
 - maximum advertised width and height of 4096, subject to the SM8150
   H.264 limit of 36,864 macroblocks per frame;
-- DRM PRIME export and zero-copy GPU interop are not implemented;
+- exported Vulkan surfaces are copied into the V4L2 MMAP queue; direct
+  DMA-BUF submission into Venus is not implemented;
 - concurrent sessions and long-running service workloads still require
   application-specific testing.

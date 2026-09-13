@@ -166,10 +166,39 @@ static int set_parameters(
         return encoder_error(encoder, "VIDIOC_S_PARM(OUTPUT)");
 
     status = set_control(
-        encoder, V4L2_CID_MPEG_VIDEO_BITRATE,
-        (int32_t)config->bitrate, "S_CTRL(BITRATE)");
+        encoder, V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
+        config->rate_control_enabled ? 1 : 0,
+        "S_CTRL(FRAME_RC_ENABLE)");
     if (status < 0)
         return status;
+
+    if (config->rate_control_enabled) {
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+            (int32_t)config->bitrate_mode,
+            "S_CTRL(BITRATE_MODE)");
+        if (status < 0)
+            return status;
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_BITRATE,
+            (int32_t)config->bitrate,
+            "S_CTRL(BITRATE)");
+        if (status < 0)
+            return status;
+    } else {
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
+            (int32_t)config->h264_i_qp,
+            "S_CTRL(H264_I_FRAME_QP)");
+        if (status < 0)
+            return status;
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,
+            (int32_t)config->h264_p_qp,
+            "S_CTRL(H264_P_FRAME_QP)");
+        if (status < 0)
+            return status;
+    }
 
     status = set_control(
         encoder, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
@@ -186,6 +215,20 @@ static int set_parameters(
     status = set_control(
         encoder, V4L2_CID_MPEG_VIDEO_H264_PROFILE,
         (int32_t)config->h264_profile, "S_CTRL(H264_PROFILE)");
+    if (status < 0)
+        return status;
+
+    status = set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
+        (int32_t)config->h264_entropy_mode,
+        "S_CTRL(H264_ENTROPY_MODE)");
+    if (status < 0)
+        return status;
+
+    status = set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM,
+        (int32_t)config->h264_transform_8x8,
+        "S_CTRL(H264_8X8_TRANSFORM)");
     if (status < 0)
         return status;
 
@@ -362,13 +405,26 @@ int venus_v4l2_encoder_open(
 
     if (!config || !result || !config->device ||
         config->width == 0 || config->height == 0 ||
-        config->frames_per_second == 0 || config->bitrate == 0 ||
+        config->frames_per_second == 0 ||
         config->gop_size == 0 ||
         config->capture_buffer_size == 0 ||
         config->capture_buffer_size > UINT32_MAX ||
         config->output_buffers == 0 ||
         config->capture_buffers == 0)
         return -EINVAL;
+    if (config->rate_control_enabled) {
+        if ((config->bitrate_mode !=
+                 V4L2_MPEG_VIDEO_BITRATE_MODE_VBR &&
+             config->bitrate_mode !=
+                 V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ||
+            config->bitrate == 0)
+            return -EINVAL;
+    } else if (config->h264_i_qp < 1 ||
+               config->h264_i_qp > 51 ||
+               config->h264_p_qp < 1 ||
+               config->h264_p_qp > 51) {
+        return -EINVAL;
+    }
 
     encoder = calloc(1, sizeof(*encoder));
     if (!encoder)

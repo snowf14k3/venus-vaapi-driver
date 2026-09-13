@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: MIT
 #include "backend_internal.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <linux/dma-buf.h>
+#include <linux/dma-heap.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <va/va_drmcommon.h>
+#include <drm_fourcc.h>
 
 static int nv12_size(unsigned int width, unsigned int height,
                      size_t *size)
@@ -19,6 +28,157 @@ static int nv12_size(unsigned int width, unsigned int height,
         return -1;
 
     *size = pixels + pixels / 2;
+    return 0;
+}
+
+static int xioctl(int fd, unsigned long request, void *argument)
+{
+    int result;
+
+    do {
+        result = ioctl(fd, request, argument);
+    } while (result < 0 && errno == EINTR);
+    return result;
+}
+
+static int align_size(size_t value, size_t alignment,
+                      size_t *result)
+{
+    size_t remainder;
+
+    if (alignment == 0)
+        return -EINVAL;
+    remainder = value % alignment;
+    if (remainder == 0) {
+        *result = value;
+        return 0;
+    }
+    if (value > SIZE_MAX - (alignment - remainder))
+        return -EOVERFLOW;
+    *result = value + alignment - remainder;
+    return 0;
+}
+
+static void release_surface(struct venus_surface *surface)
+{
+    if (!surface)
+        return;
+
+    if (surface->dma_backed) {
+        if (surface->data && surface->capacity)
+            munmap(surface->data, surface->capacity);
+        if (surface->dma_fd >= 0)
+            close(surface->dma_fd);
+    } else {
+        free(surface->data);
+    }
+    memset(surface, 0, sizeof(*surface));
+}
+
+static int allocate_dma_surface(struct venus_surface *surface,
+                                unsigned int width,
+                                unsigned int height)
+{
+    static const char *const heap_paths[] = {
+        "/dev/dma_heap/system",
+        "/dev/dma_heap/linux,cma",
+        "/dev/dma_heap/default_cma_region",
+    };
+    struct dma_heap_allocation_data allocation = { 0 };
+    size_t stride;
+    size_t scanlines;
+    size_t chroma_scanlines;
+    size_t uv_offset;
+    size_t allocation_size;
+    unsigned int index;
+    int heap_fd = -1;
+    int saved_errno;
+
+    if (align_size(width, 128, &stride) < 0 ||
+        align_size(height, 32, &scanlines) < 0 ||
+        align_size(height / 2, 16, &chroma_scanlines) < 0 ||
+        stride > SIZE_MAX / scanlines)
+        return -EOVERFLOW;
+
+    uv_offset = stride * scanlines;
+    if (stride > SIZE_MAX / chroma_scanlines ||
+        uv_offset >
+            SIZE_MAX - stride * chroma_scanlines)
+        return -EOVERFLOW;
+    allocation_size =
+        uv_offset + stride * chroma_scanlines;
+    if (align_size(allocation_size, 4096,
+                   &allocation_size) < 0 ||
+        allocation_size > UINT32_MAX)
+        return -EOVERFLOW;
+
+    for (index = 0;
+         index < sizeof(heap_paths) / sizeof(heap_paths[0]);
+         index++) {
+        heap_fd = open(heap_paths[index],
+                       O_RDWR | O_CLOEXEC);
+        if (heap_fd >= 0)
+            break;
+    }
+    if (heap_fd < 0)
+        return -errno;
+
+    allocation.len = allocation_size;
+    allocation.fd_flags = O_RDWR | O_CLOEXEC;
+    if (xioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC,
+               &allocation) < 0) {
+        saved_errno = errno;
+        close(heap_fd);
+        return -saved_errno;
+    }
+    close(heap_fd);
+
+    surface->data =
+        mmap(NULL, allocation_size, PROT_READ | PROT_WRITE,
+             MAP_SHARED, (int)allocation.fd, 0);
+    if (surface->data == MAP_FAILED) {
+        saved_errno = errno;
+        surface->data = NULL;
+        close((int)allocation.fd);
+        return -saved_errno;
+    }
+
+    memset(surface->data, 0, allocation_size);
+    surface->dma_fd = (int)allocation.fd;
+    surface->dma_backed = true;
+    surface->stride = (uint32_t)stride;
+    surface->scanlines = (uint32_t)scanlines;
+    surface->uv_offset = uv_offset;
+    surface->capacity = allocation_size;
+    surface->data_size = allocation_size;
+    return 0;
+}
+
+int venus_surface_begin_cpu_read(struct venus_surface *surface)
+{
+    struct dma_buf_sync sync = {
+        .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ,
+    };
+
+    if (!surface || !surface->dma_backed)
+        return 0;
+    if (xioctl(surface->dma_fd, DMA_BUF_IOCTL_SYNC,
+               &sync) < 0)
+        return -errno;
+    return 0;
+}
+
+int venus_surface_end_cpu_read(struct venus_surface *surface)
+{
+    struct dma_buf_sync sync = {
+        .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ,
+    };
+
+    if (!surface || !surface->dma_backed)
+        return 0;
+    if (xioctl(surface->dma_fd, DMA_BUF_IOCTL_SYNC,
+               &sync) < 0)
+        return -errno;
     return 0;
 }
 
@@ -73,13 +233,14 @@ static struct venus_buffer *allocate_buffer(
     return NULL;
 }
 
-static bool valid_surface_attributes(VASurfaceAttrib *attributes,
-                                     unsigned int num_attributes,
-                                     uint32_t *fourcc)
+static bool valid_surface_attributes(
+    VASurfaceAttrib *attributes, unsigned int num_attributes,
+    uint32_t *fourcc, bool *exportable)
 {
     unsigned int index;
 
     *fourcc = VA_FOURCC_NV12;
+    *exportable = false;
     for (index = 0; index < num_attributes; index++) {
         const VASurfaceAttrib *attribute = &attributes[index];
 
@@ -89,11 +250,28 @@ static bool valid_surface_attributes(VASurfaceAttrib *attributes,
                 return false;
             *fourcc = (uint32_t)attribute->value.value.i;
         } else if (attribute->type == VASurfaceAttribMemoryType) {
-            if (attribute->value.type != VAGenericValueTypeInteger ||
-                !(attribute->value.value.i &
-                  VA_SURFACE_ATTRIB_MEM_TYPE_VA))
+            int memory_type;
+
+            if (attribute->value.type != VAGenericValueTypeInteger)
                 return false;
-        } else if (attribute->flags & VA_SURFACE_ATTRIB_SETTABLE) {
+            memory_type = attribute->value.value.i;
+            if (!(memory_type &
+                  (VA_SURFACE_ATTRIB_MEM_TYPE_VA |
+                   VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2)))
+                return false;
+            if (memory_type &
+                VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2)
+                *exportable = true;
+        } else if (attribute->type ==
+                   VASurfaceAttribUsageHint) {
+            if (attribute->value.type !=
+                VAGenericValueTypeInteger)
+                return false;
+            if (attribute->value.value.i &
+                VA_SURFACE_ATTRIB_USAGE_HINT_EXPORT)
+                *exportable = true;
+        } else if (attribute->flags &
+                   VA_SURFACE_ATTRIB_SETTABLE) {
             return false;
         }
     }
@@ -110,6 +288,7 @@ static VAStatus create_surfaces_locked(
     struct venus_surface *created[VENUS_MAX_SURFACES];
     size_t capacity;
     uint32_t fourcc;
+    bool exportable;
     unsigned int free_slots = 0;
     unsigned int created_count = 0;
     unsigned int index;
@@ -125,7 +304,8 @@ static VAStatus create_surfaces_locked(
     if (num_attributes > 0 && !attributes)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     if (!valid_surface_attributes(
-            attributes, num_attributes, &fourcc))
+            attributes, num_attributes, &fourcc,
+            &exportable))
         return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
 
     for (index = 0; index < VENUS_MAX_SURFACES; index++) {
@@ -143,25 +323,42 @@ static VAStatus create_surfaces_locked(
         if (surface->used)
             continue;
 
-        surface->data = calloc(1, capacity);
-        if (!surface->data)
-            goto fail;
+        surface->dma_fd = -1;
+        if (exportable) {
+            if (allocate_dma_surface(
+                    surface, width, height) < 0) {
+                release_surface(surface);
+                goto fail;
+            }
+        } else {
+            surface->data = calloc(1, capacity);
+            if (!surface->data) {
+                release_surface(surface);
+                goto fail;
+            }
+            surface->capacity = capacity;
+            surface->data_size = capacity;
+            surface->stride = width;
+            surface->scanlines = height;
+            surface->uv_offset = (size_t)width * height;
+        }
 
         surface->used = true;
         surface->id = VENUS_SURFACE_BASE | (index + 1);
         surface->width = width;
         surface->height = height;
         surface->fourcc = fourcc;
-        surface->capacity = capacity;
-        surface->data_size = capacity;
         surface->ready = true;
         surface->coded_buffer_id = VA_INVALID_ID;
         surface->context_id = VA_INVALID_ID;
         created[created_count] = surface;
         surface_ids[created_count] = surface->id;
-        venus_backend_log(backend,
-                          "create-surface id=0x%x size=%ux%u bytes=%zu",
-                          surface->id, width, height, capacity);
+        venus_backend_log(
+            backend,
+            "create-surface id=0x%x size=%ux%u bytes=%zu stride=%u dma=%s",
+            surface->id, width, height, surface->capacity,
+            surface->stride,
+            surface->dma_backed ? "yes" : "no");
         created_count++;
     }
 
@@ -171,8 +368,7 @@ fail:
     while (created_count > 0) {
         struct venus_surface *surface = created[--created_count];
 
-        free(surface->data);
-        memset(surface, 0, sizeof(*surface));
+        release_surface(surface);
     }
     return VA_STATUS_ERROR_ALLOCATION_FAILED;
 }
@@ -243,8 +439,7 @@ static VAStatus backend_destroy_surfaces(
         struct venus_surface *surface =
             venus_backend_find_surface(backend, surface_ids[index]);
 
-        free(surface->data);
-        memset(surface, 0, sizeof(*surface));
+        release_surface(surface);
     }
 
     pthread_mutex_unlock(&backend->mutex);
@@ -481,7 +676,8 @@ static VAStatus backend_query_image_formats(
 static VAStatus create_image_locked(
     struct venus_backend *backend, unsigned int width,
     unsigned int height, uint8_t *external_data,
-    size_t external_size, VASurfaceID surface_id,
+    size_t external_size, uint32_t stride,
+    size_t uv_offset, VASurfaceID surface_id,
     VAImage *result)
 {
     struct venus_buffer *buffer = NULL;
@@ -489,9 +685,12 @@ static VAStatus create_image_locked(
     size_t data_size;
     unsigned int index;
 
-    if (!result || nv12_size(width, height, &data_size) < 0)
+    if (!result || nv12_size(width, height, &data_size) < 0 ||
+        stride < width ||
+        uv_offset < (size_t)stride * height)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
-    if (external_data && external_size < data_size)
+    if (external_data && external_size <
+            uv_offset + (size_t)stride * (height / 2))
         return VA_STATUS_ERROR_NOT_ENOUGH_BUFFER;
 
     buffer = allocate_buffer(
@@ -517,6 +716,10 @@ static VAStatus create_image_locked(
         .id = VENUS_IMAGE_BASE | (index + 1),
         .buffer_id = buffer->id,
         .surface_id = surface_id,
+        .width = width,
+        .height = height,
+        .stride = stride,
+        .uv_offset = uv_offset,
     };
 
     memset(result, 0, sizeof(*result));
@@ -525,12 +728,13 @@ static VAStatus create_image_locked(
     result->buf = buffer->id;
     result->width = (uint16_t)width;
     result->height = (uint16_t)height;
-    result->data_size = (uint32_t)data_size;
+    result->data_size = (uint32_t)(
+        external_data ? external_size : data_size);
     result->num_planes = 2;
-    result->pitches[0] = width;
-    result->pitches[1] = width;
+    result->pitches[0] = stride;
+    result->pitches[1] = stride;
     result->offsets[0] = 0;
-    result->offsets[1] = width * height;
+    result->offsets[1] = (uint32_t)uv_offset;
     return VA_STATUS_SUCCESS;
 }
 
@@ -549,7 +753,9 @@ static VAStatus backend_create_image(
     pthread_mutex_lock(&backend->mutex);
     status = create_image_locked(
         backend, (unsigned int)width, (unsigned int)height,
-        NULL, 0, VA_INVALID_ID, image);
+        NULL, 0, (uint32_t)width,
+        (size_t)width * (unsigned int)height,
+        VA_INVALID_ID, image);
     pthread_mutex_unlock(&backend->mutex);
     return status;
 }
@@ -579,7 +785,9 @@ static VAStatus backend_derive_image(VADriverContextP context,
 
     status = create_image_locked(
         backend, surface->width, surface->height,
-        surface->data, surface->capacity, surface->id, image);
+        surface->data, surface->capacity,
+        surface->stride, surface->uv_offset,
+        surface->id, image);
     if (status == VA_STATUS_SUCCESS)
         venus_backend_log(backend,
                           "derive-image surface=0x%x image=0x%x bytes=%u",
@@ -708,6 +916,72 @@ static VAStatus backend_put_image(
     return VA_STATUS_SUCCESS;
 }
 
+static VAStatus backend_export_surface_handle(
+    VADriverContextP context, VASurfaceID surface_id,
+    uint32_t memory_type, uint32_t flags, void *descriptor)
+{
+    struct venus_backend *backend =
+        venus_backend_from_context(context);
+    struct venus_surface *surface;
+    VADRMPRIMESurfaceDescriptor *prime = descriptor;
+    int exported_fd;
+
+    if (!backend || !descriptor)
+        return VA_STATUS_ERROR_INVALID_PARAMETER;
+    if (memory_type !=
+        VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 ||
+        !(flags & VA_EXPORT_SURFACE_SEPARATE_LAYERS))
+        return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+
+    pthread_mutex_lock(&backend->mutex);
+    surface = venus_backend_find_surface(backend, surface_id);
+    if (!surface || !surface->dma_backed ||
+        surface->dma_fd < 0) {
+        pthread_mutex_unlock(&backend->mutex);
+        return !surface ? VA_STATUS_ERROR_INVALID_SURFACE
+                        : VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+    }
+
+    exported_fd =
+        fcntl(surface->dma_fd, F_DUPFD_CLOEXEC, 0);
+    if (exported_fd < 0) {
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+
+    memset(prime, 0, sizeof(*prime));
+    prime->fourcc = VA_FOURCC_NV12;
+    prime->width = surface->width;
+    prime->height = surface->height;
+    prime->num_objects = 1;
+    prime->objects[0].fd = exported_fd;
+    prime->objects[0].size = (uint32_t)surface->capacity;
+    prime->objects[0].drm_format_modifier =
+        DRM_FORMAT_MOD_LINEAR;
+    prime->num_layers = 2;
+
+    prime->layers[0].drm_format = DRM_FORMAT_R8;
+    prime->layers[0].num_planes = 1;
+    prime->layers[0].object_index[0] = 0;
+    prime->layers[0].offset[0] = 0;
+    prime->layers[0].pitch[0] = surface->stride;
+
+    prime->layers[1].drm_format = DRM_FORMAT_GR88;
+    prime->layers[1].num_planes = 1;
+    prime->layers[1].object_index[0] = 0;
+    prime->layers[1].offset[0] =
+        (uint32_t)surface->uv_offset;
+    prime->layers[1].pitch[0] = surface->stride;
+
+    venus_backend_log(
+        backend,
+        "export-surface id=0x%x fd=%d size=%zu stride=%u uv=%zu",
+        surface->id, exported_fd, surface->capacity,
+        surface->stride, surface->uv_offset);
+    pthread_mutex_unlock(&backend->mutex);
+    return VA_STATUS_SUCCESS;
+}
+
 static VAStatus backend_query_surface_attributes(
     VADriverContextP context, VAConfigID config_id,
     VASurfaceAttrib *attributes, unsigned int *num_attributes)
@@ -715,7 +989,7 @@ static VAStatus backend_query_surface_attributes(
     struct venus_backend *backend =
         venus_backend_from_context(context);
     struct venus_config *config;
-    VASurfaceAttrib values[6];
+    VASurfaceAttrib values[7];
     unsigned int required =
         (unsigned int)(sizeof(values) / sizeof(values[0]));
 
@@ -744,7 +1018,8 @@ static VAStatus backend_query_surface_attributes(
                  VA_SURFACE_ATTRIB_SETTABLE,
         .value = {
             .type = VAGenericValueTypeInteger,
-            .value.i = VA_SURFACE_ATTRIB_MEM_TYPE_VA,
+            .value.i = VA_SURFACE_ATTRIB_MEM_TYPE_VA |
+                       VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
         },
     };
     values[2] = (VASurfaceAttrib) {
@@ -779,6 +1054,16 @@ static VAStatus backend_query_surface_attributes(
             .value.i = VENUS_MAX_HEIGHT,
         },
     };
+    values[6] = (VASurfaceAttrib) {
+        .type = VASurfaceAttribUsageHint,
+        .flags = VA_SURFACE_ATTRIB_GETTABLE |
+                 VA_SURFACE_ATTRIB_SETTABLE,
+        .value = {
+            .type = VAGenericValueTypeInteger,
+            .value.i = VA_SURFACE_ATTRIB_USAGE_HINT_EXPORT |
+                       VA_SURFACE_ATTRIB_USAGE_HINT_ENCODER,
+        },
+    };
 
     if (!attributes) {
         *num_attributes = required;
@@ -806,11 +1091,8 @@ void venus_objects_destroy_all(struct venus_backend *backend)
                sizeof(backend->images[index]));
     for (index = 0; index < VENUS_MAX_BUFFERS; index++)
         venus_backend_free_buffer(&backend->buffers[index]);
-    for (index = 0; index < VENUS_MAX_SURFACES; index++) {
-        free(backend->surfaces[index].data);
-        memset(&backend->surfaces[index], 0,
-               sizeof(backend->surfaces[index]));
-    }
+    for (index = 0; index < VENUS_MAX_SURFACES; index++)
+        release_surface(&backend->surfaces[index]);
     memset(backend->configs, 0, sizeof(backend->configs));
 }
 
@@ -833,4 +1115,6 @@ void venus_objects_fill_vtable(struct VADriverVTable *vtable)
     vtable->vaPutImage = backend_put_image;
     vtable->vaQuerySurfaceAttributes =
         backend_query_surface_attributes;
+    vtable->vaExportSurfaceHandle =
+        backend_export_surface_handle;
 }

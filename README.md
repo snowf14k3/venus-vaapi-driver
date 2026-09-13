@@ -27,8 +27,10 @@ The repository currently provides:
   sync and NV12 image-download paths backed by that same session;
 - a device-validated H.264 stateful encoder session for NV12 input,
   V4L2 controls, encoded CAPTURE packets and drain;
-- experimental H.264 Baseline/Main/High EncSlice config, context, parameter,
-  coded-buffer, sync and CPU-backed NV12 upload paths using that session.
+- H.264 Baseline/Main/High EncSlice config, context, parameter,
+  coded-buffer, sync and CPU-backed NV12 upload paths using that session;
+- a GNOME Remote Desktop compatibility candidate with CQP, accepted packed
+  headers and linear NV12 DRM PRIME export backed by the system DMA-BUF heap.
 
 Debian 13 ships libva 2.22. A driver built against libva 1.20 remains loadable
 because libva searches compatible lower minor-version init symbols.

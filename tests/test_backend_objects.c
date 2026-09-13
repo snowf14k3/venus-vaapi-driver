@@ -32,14 +32,18 @@ int main(void)
         .type = VAConfigAttribRTFormat,
         .value = VA_RT_FORMAT_YUV420,
     };
-    VAConfigAttrib encode_attributes[2] = {
+    VAConfigAttrib encode_attributes[3] = {
         {
             .type = VAConfigAttribRTFormat,
             .value = VA_RT_FORMAT_YUV420,
         },
         {
             .type = VAConfigAttribRateControl,
-            .value = VA_RC_CBR,
+            .value = VA_RC_CQP,
+        },
+        {
+            .type = VAConfigAttribEncPackedHeaders,
+            .value = VENUS_H264_PACKED_HEADERS,
         },
     };
     VAConfigAttrib queried_attributes[4] = {
@@ -137,8 +141,10 @@ int main(void)
                VAEntrypointEncSlice, queried_attributes,
                4) == VA_STATUS_SUCCESS);
     assert(queried_attributes[0].value == VA_RT_FORMAT_YUV420);
-    assert(queried_attributes[1].value == VA_RC_CBR);
-    assert(queried_attributes[2].value == VA_ATTRIB_NOT_SUPPORTED);
+    assert(queried_attributes[1].value ==
+           (VA_RC_CBR | VA_RC_CQP));
+    assert(queried_attributes[2].value ==
+           VENUS_H264_PACKED_HEADERS);
     assert(queried_attributes[3].value == 1);
 
     assert(vtable.vaCreateConfig(
@@ -148,7 +154,7 @@ int main(void)
     assert(vtable.vaQuerySurfaceAttributes(
                &context, config, NULL,
                &num_surface_attributes) == VA_STATUS_SUCCESS);
-    assert(num_surface_attributes == 6);
+    assert(num_surface_attributes == 7);
 
     assert(vtable.vaCreateSurfaces2(
                &context, VA_RT_FORMAT_YUV420, 64, 32,
@@ -199,7 +205,7 @@ int main(void)
 
     assert(vtable.vaCreateConfig(
                &context, VAProfileH264High, VAEntrypointEncSlice,
-               encode_attributes, 2,
+               encode_attributes, 3,
                &encode_config) == VA_STATUS_SUCCESS);
     assert(vtable.vaCreateContext(
                &context, encode_config, 64, 32, VA_PROGRESSIVE,

@@ -22,6 +22,7 @@ struct venus_h264_encode_parameters {
     const VAEncPictureParameterBufferH264 *picture;
     uint32_t bitrate;
     uint32_t frames_per_second;
+    int8_t slice_qp_delta;
     bool has_slice;
 };
 
@@ -96,6 +97,8 @@ static int parse_misc_parameter(
             frame_rate->framerate, &parameters->frames_per_second);
     }
     case VAEncMiscParameterTypeHRD:
+    case VAEncMiscParameterTypeQualityLevel:
+    case VAEncMiscParameterTypeSubMbPartPel:
         return 0;
     default:
         return -ENOTSUP;
@@ -131,6 +134,7 @@ static int collect_parameters(
     struct venus_backend *backend, struct venus_context *context,
     struct venus_h264_encode_parameters *parameters)
 {
+    const VAEncPackedHeaderParameterBuffer *packed = NULL;
     size_t index;
 
     memset(parameters, 0, sizeof(*parameters));
@@ -166,7 +170,33 @@ static int collect_parameters(
             status = parse_slice_parameters(buffer);
             if (status < 0)
                 return status;
+            if (!parameters->has_slice) {
+                const VAEncSliceParameterBufferH264 *slice =
+                    (const VAEncSliceParameterBufferH264 *)
+                        buffer->data;
+
+                parameters->slice_qp_delta =
+                    slice->slice_qp_delta;
+            }
             parameters->has_slice = true;
+            break;
+        case VAEncPackedHeaderParameterBufferType:
+            if (packed || buffer->num_elements != 1 ||
+                buffer->element_size <
+                    sizeof(VAEncPackedHeaderParameterBuffer))
+                return -EINVAL;
+            packed =
+                (const VAEncPackedHeaderParameterBuffer *)
+                    buffer->data;
+            if (!(packed->type &
+                  VENUS_H264_PACKED_HEADERS))
+                return -ENOTSUP;
+            break;
+        case VAEncPackedHeaderDataBufferType:
+            if (!packed ||
+                packed->bit_length > buffer_bytes(buffer) * 8)
+                return -EINVAL;
+            packed = NULL;
             break;
         case VAEncMiscParameterBufferType:
             status = parse_misc_parameter(buffer, parameters);
@@ -180,7 +210,8 @@ static int collect_parameters(
         }
     }
 
-    if (!parameters->picture || !parameters->has_slice)
+    if (!parameters->picture || !parameters->has_slice ||
+        packed)
         return -EINVAL;
     return 0;
 }
@@ -410,6 +441,8 @@ static int open_encoder(
     uint32_t frames_per_second = parameters->frames_per_second;
     uint32_t encode_width;
     uint32_t encode_height;
+    uint32_t bitrate_mode;
+    int32_t qp;
     uint32_t gop_size = 0;
     int status;
 
@@ -435,6 +468,20 @@ static int open_encoder(
     if (bitrate > INT_MAX)
         return -ERANGE;
 
+    if (frames_per_second == 0 &&
+        parameters->sequence->
+            vui_fields.bits.timing_info_present_flag &&
+        parameters->sequence->num_units_in_tick > 0) {
+        uint64_t denominator =
+            (uint64_t)parameters->sequence->
+                num_units_in_tick * 2u;
+        uint64_t derived =
+            parameters->sequence->time_scale /
+            denominator;
+
+        if (derived > 0 && derived <= 240)
+            frames_per_second = (uint32_t)derived;
+    }
     if (frames_per_second == 0)
         frames_per_second = VENUS_ENCODE_DEFAULT_FPS;
     if ((context->width / 16u) *
@@ -447,7 +494,19 @@ static int open_encoder(
     if (gop_size == 0)
         gop_size = parameters->sequence->intra_period;
     if (gop_size == 0)
-        gop_size = VENUS_ENCODE_DEFAULT_GOP;
+        gop_size = config->rate_control == VA_RC_CQP
+                       ? 65535u
+                       : VENUS_ENCODE_DEFAULT_GOP;
+
+    qp = (int32_t)parameters->picture->pic_init_qp +
+         parameters->slice_qp_delta;
+    if (qp < 1 || qp > 51)
+        return -EINVAL;
+
+    bitrate_mode =
+        config->rate_control == VA_RC_CBR
+            ? V4L2_MPEG_VIDEO_BITRATE_MODE_CBR
+            : V4L2_MPEG_VIDEO_BITRATE_MODE_VBR;
 
     context->encode_width = encode_width;
     context->encode_height = encode_height;
@@ -459,9 +518,22 @@ static int open_encoder(
         .height = encode_height,
         .frames_per_second = frames_per_second,
         .bitrate = bitrate,
+        .rate_control_enabled =
+            config->rate_control != VA_RC_CQP,
+        .bitrate_mode = bitrate_mode,
+        .h264_i_qp = (uint32_t)qp,
+        .h264_p_qp = (uint32_t)qp,
         .gop_size = gop_size,
         .h264_profile = profile,
         .h264_level = level,
+        .h264_entropy_mode =
+            parameters->picture->
+                pic_fields.bits.entropy_coding_mode_flag
+                ? V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC
+                : V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CAVLC,
+        .h264_transform_8x8 =
+            parameters->picture->
+                pic_fields.bits.transform_8x8_mode_flag,
         .capture_buffer_size = coded_capacity,
         .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
         .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
@@ -480,11 +552,12 @@ static int open_encoder(
 
     venus_backend_log(
         backend,
-        "encoder-open context=0x%x profile=%d level=%u size=%ux%u fps=%u bitrate=%u gop=%u output=%u capture=%u",
+        "encoder-open context=0x%x profile=%d level=%u size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u output=%u capture=%u",
         context->id, config->profile,
         parameters->sequence->level_idc,
         context->encode_width, context->encode_height,
-        frames_per_second, bitrate, gop_size,
+        frames_per_second, config->rate_control,
+        bitrate, qp, gop_size,
         venus_v4l2_encoder_output_count(context->encoder),
         venus_v4l2_encoder_capture_count(context->encoder));
     return 0;
@@ -496,7 +569,9 @@ static int prepare_surface_frame(
     const uint8_t **frame_data, uint8_t **allocated,
     size_t *frame_size)
 {
-    size_t source_pixels;
+    uint32_t source_stride;
+    size_t source_uv_offset;
+    size_t source_required;
     size_t destination_pixels;
     unsigned int row;
 
@@ -506,22 +581,33 @@ static int prepare_surface_frame(
 
     if (!surface || width == 0 || height == 0 ||
         width > surface->width || height > surface->height ||
-        surface->width > SIZE_MAX / surface->height ||
         width > SIZE_MAX / height)
         return -EINVAL;
 
-    source_pixels =
-        (size_t)surface->width * surface->height;
+    source_stride =
+        surface->stride ? surface->stride : surface->width;
+    source_uv_offset =
+        surface->uv_offset
+            ? surface->uv_offset
+            : (size_t)surface->width * surface->height;
+    if (source_stride < surface->width ||
+        source_stride > SIZE_MAX / (height / 2))
+        return -EINVAL;
+    source_required =
+        source_uv_offset +
+        (size_t)source_stride * (height / 2);
     destination_pixels = (size_t)width * height;
-    if (surface->data_size <
-            source_pixels + source_pixels / 2 ||
-        destination_pixels > SIZE_MAX - destination_pixels / 2)
+    if (surface->data_size < source_required ||
+        destination_pixels >
+            SIZE_MAX - destination_pixels / 2)
         return -EINVAL;
 
     *frame_size =
         destination_pixels + destination_pixels / 2;
     if (width == surface->width &&
-        height == surface->height) {
+        height == surface->height &&
+        source_stride == width &&
+        source_uv_offset == destination_pixels) {
         *frame_data = surface->data;
         return 0;
     }
@@ -533,14 +619,14 @@ static int prepare_surface_frame(
     for (row = 0; row < height; row++)
         memcpy(*allocated + (size_t)row * width,
                surface->data +
-                   (size_t)row * surface->width,
+                   (size_t)row * source_stride,
                width);
 
     for (row = 0; row < height / 2; row++)
         memcpy(*allocated + destination_pixels +
                    (size_t)row * width,
-               surface->data + source_pixels +
-                   (size_t)row * surface->width,
+               surface->data + source_uv_offset +
+                   (size_t)row * source_stride,
                width);
 
     *frame_data = *allocated;
@@ -600,12 +686,18 @@ VAStatus venus_encode_end_picture_locked(
             return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
+    status = venus_surface_begin_cpu_read(surface);
+    if (status < 0)
+        return venus_backend_encode_status_from_errno(status);
+
     status = prepare_surface_frame(
         surface, context->encode_width,
         context->encode_height, &frame_data,
         &allocated_frame, &expected_frame_size);
-    if (status < 0)
+    if (status < 0) {
+        venus_surface_end_cpu_read(surface);
         return venus_backend_encode_status_from_errno(status);
+    }
 
     coded->coded_size = 0;
     coded->coded_ready = false;
@@ -618,6 +710,7 @@ VAStatus venus_encode_end_picture_locked(
         context, coded->id);
     if (status < 0) {
         free(allocated_frame);
+        venus_surface_end_cpu_read(surface);
         return venus_backend_encode_status_from_errno(status);
     }
 
@@ -634,6 +727,16 @@ VAStatus venus_encode_end_picture_locked(
         expected_frame_size, frame_tag,
         store_packet, context);
     free(allocated_frame);
+    {
+        int sync_status =
+            venus_surface_end_cpu_read(surface);
+
+        if (sync_status < 0)
+            venus_backend_log(
+                backend,
+                "surface CPU sync end failed surface=0x%x error=%d",
+                surface->id, -sync_status);
+    }
     if (status < 0) {
         rollback_coded_buffer(context, coded->id);
         surface->encode_pending = false;

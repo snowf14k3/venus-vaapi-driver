@@ -27,8 +27,8 @@ DRM="$(find /dev/dri -maxdepth 1 -type c -name 'renderD*' -print -quit)"
     exit 1
 }
 
-OUT="$(mktemp -d /var/tmp/venus-vaapi-h264-encode.XXXXXX)"
-MARK="VENUS_VAAPI_H264_ENCODE_$(cat /proc/sys/kernel/random/boot_id)_$$"
+OUT="$(mktemp -d /var/tmp/venus-vaapi-h264-cqp.XXXXXX)"
+MARK="VENUS_VAAPI_H264_CQP_$(cat /proc/sys/kernel/random/boot_id)_$$"
 echo "${MARK}" > /dev/kmsg
 echo "日志目录：${OUT}"
 echo "drm=${DRM}"
@@ -53,7 +53,7 @@ timeout -k 2s 60s env \
     -f lavfi -i "testsrc2=size=640x480:rate=15" \
     -frames:v 30 -vf "format=nv12,hwupload" \
     -c:v h264_vaapi -profile:v high \
-    -rc_mode CBR -b:v 1M -maxrate 1M -bufsize 2M \
+    -rc_mode CQP -qp 22 \
     -g 15 -bf 0 -f h264 "${OUT}/output.h264" \
     >"${OUT}/ffmpeg.log" 2>&1
 ENCODE_RC=$?
@@ -98,7 +98,7 @@ if (( VAINFO_RC == 0 )) &&
    grep -Eq \
        'VAProfileH264High[[:space:]]*:[[:space:]]*VAEntrypointEncSlice' \
        "${OUT}/vainfo.log"; then
-    echo "PASS：H.264 VAAPI硬编30帧，软件完整解码30帧"
+    echo "PASS：H.264 VAAPI CQP 硬编30帧，软件完整解码30帧"
 else
     echo "FAIL"
     tail -n 50 "${OUT}/ffmpeg.log"

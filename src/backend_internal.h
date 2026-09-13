@@ -32,6 +32,9 @@
 #define VENUS_MAX_HEIGHT 4096u
 #define VENUS_H264_MAX_MACROBLOCKS 36864u
 #define VENUS_H264_MAX_MACROBLOCKS_PER_SECOND 1036800u
+#define VENUS_H264_PACKED_HEADERS \
+    (VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_PICTURE | \
+     VA_ENC_PACKED_HEADER_SLICE | VA_ENC_PACKED_HEADER_RAW_DATA)
 
 struct venus_config {
     bool used;
@@ -39,6 +42,7 @@ struct venus_config {
     VAProfile profile;
     VAEntrypoint entrypoint;
     uint32_t rate_control;
+    uint32_t packed_headers;
 };
 
 struct venus_surface {
@@ -50,6 +54,11 @@ struct venus_surface {
     uint8_t *data;
     size_t capacity;
     size_t data_size;
+    uint32_t stride;
+    uint32_t scanlines;
+    size_t uv_offset;
+    int dma_fd;
+    bool dma_backed;
     bool ready;
     bool encode_pending;
     VABufferID coded_buffer_id;
@@ -77,6 +86,10 @@ struct venus_image {
     VAImageID id;
     VABufferID buffer_id;
     VASurfaceID surface_id;
+    unsigned int width;
+    unsigned int height;
+    uint32_t stride;
+    size_t uv_offset;
 };
 
 struct venus_context {
@@ -136,6 +149,8 @@ struct venus_image *venus_backend_find_image(
     struct venus_backend *backend, VAImageID id);
 
 void venus_backend_free_buffer(struct venus_buffer *buffer);
+int venus_surface_begin_cpu_read(struct venus_surface *surface);
+int venus_surface_end_cpu_read(struct venus_surface *surface);
 void venus_objects_fill_vtable(struct VADriverVTable *vtable);
 void venus_objects_destroy_all(struct venus_backend *backend);
 void venus_decode_fill_vtable(struct VADriverVTable *vtable);

@@ -34,14 +34,14 @@ backend_objects_test = executable(
   'test-backend-objects',
   driver_sources + files('test_backend_objects.c'),
   include_directories: project_inc,
-  dependencies: [libva_dep, threads_dep],
+  dependencies: [libva_dep, libdrm_dep, threads_dep],
 )
 
 driver_init_test = executable(
   'test-driver-init',
   driver_sources + files('test_driver_init.c'),
   include_directories: project_inc,
-  dependencies: [libva_dep, threads_dep],
+  dependencies: [libva_dep, libdrm_dep, threads_dep],
 )
 
 dl_dep = cc.find_library('dl')

@@ -1,7 +1,7 @@
 project(
   'venus-vaapi-driver',
   'c',
-  version: '0.3.0',
+  version: '0.4.0',
   license: 'MIT',
   meson_version: '>=1.2.0',
   default_options: [
@@ -13,6 +13,8 @@ project(
 
 cc = meson.get_compiler('c')
 libva_dep = dependency('libva', version: '>=1.20')
+libva_drm_dep = dependency('libva-drm', version: '>=1.20')
+libdrm_dep = dependency('libdrm')
 threads_dep = dependency('threads')
 
 add_project_arguments(
@@ -55,7 +57,7 @@ venus_driver = shared_module(
   'venus_drv_video',
   driver_sources,
   include_directories: project_inc,
-  dependencies: [libva_dep, threads_dep],
+  dependencies: [libva_dep, libdrm_dep, threads_dep],
   name_prefix: '',
   gnu_symbol_visibility: 'hidden',
   install: true,
@@ -68,6 +70,13 @@ executable(
   include_directories: project_inc,
   dependencies: [threads_dep],
   install: true,
+)
+
+executable(
+  'venus-gnome-rdp-check',
+  files('tools/venus-gnome-rdp-check.c'),
+  dependencies: [libva_dep, libva_drm_dep, libdrm_dep],
+  install: false,
 )
 
 executable(

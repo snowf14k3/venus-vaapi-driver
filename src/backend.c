@@ -289,11 +289,14 @@ static VAStatus backend_get_config_attributes(
         case VAConfigAttribRateControl:
             attributes[index].value =
                 entrypoint == VAEntrypointEncSlice
-                    ? VA_RC_CBR
+                    ? VA_RC_CBR | VA_RC_CQP
                     : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncPackedHeaders:
-            attributes[index].value = VA_ATTRIB_NOT_SUPPORTED;
+            attributes[index].value =
+                entrypoint == VAEntrypointEncSlice
+                    ? VENUS_H264_PACKED_HEADERS
+                    : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncMaxRefFrames:
             attributes[index].value =
@@ -329,6 +332,9 @@ static VAStatus backend_create_config(
     int num_attributes, VAConfigID *config_id)
 {
     struct venus_backend *backend = venus_backend_from_context(context);
+    uint32_t rate_control =
+        entrypoint == VAEntrypointEncSlice ? VA_RC_CBR : 0;
+    uint32_t packed_headers = 0;
     unsigned int index;
     int attribute;
 
@@ -358,16 +364,23 @@ static VAStatus backend_create_config(
             return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
         }
         if (entrypoint == VAEntrypointEncSlice &&
-            attributes[attribute].type == VAConfigAttribRateControl &&
-            attributes[attribute].value != VA_RC_CBR) {
-            pthread_mutex_unlock(&backend->mutex);
-            return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+            attributes[attribute].type == VAConfigAttribRateControl) {
+            if (attributes[attribute].value != VA_RC_CBR &&
+                attributes[attribute].value != VA_RC_CQP) {
+                pthread_mutex_unlock(&backend->mutex);
+                return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+            }
+            rate_control = attributes[attribute].value;
         }
         if (entrypoint == VAEntrypointEncSlice &&
-            attributes[attribute].type == VAConfigAttribEncPackedHeaders &&
-            attributes[attribute].value != 0) {
-            pthread_mutex_unlock(&backend->mutex);
-            return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+            attributes[attribute].type ==
+                VAConfigAttribEncPackedHeaders) {
+            if (attributes[attribute].value &
+                ~VENUS_H264_PACKED_HEADERS) {
+                pthread_mutex_unlock(&backend->mutex);
+                return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+            }
+            packed_headers = attributes[attribute].value;
         }
     }
 
@@ -382,13 +395,15 @@ static VAStatus backend_create_config(
             .id = VENUS_CONFIG_BASE | (index + 1),
             .profile = profile,
             .entrypoint = entrypoint,
-            .rate_control = entrypoint == VAEntrypointEncSlice
-                                ? VA_RC_CBR
-                                : 0,
+            .rate_control = rate_control,
+            .packed_headers = packed_headers,
         };
         *config_id = config->id;
-        venus_backend_log(backend, "create-config id=0x%x profile=%d entrypoint=%d",
-                          config->id, profile, entrypoint);
+        venus_backend_log(
+            backend,
+            "create-config id=0x%x profile=%d entrypoint=%d rc=0x%x packed=0x%x",
+            config->id, profile, entrypoint,
+            rate_control, packed_headers);
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_SUCCESS;
     }
@@ -448,7 +463,7 @@ static VAStatus backend_query_config_attributes(
 
     *profile = config->profile;
     *entrypoint = config->entrypoint;
-    required = config->entrypoint == VAEntrypointEncSlice ? 2 : 1;
+    required = config->entrypoint == VAEntrypointEncSlice ? 3 : 1;
     if (!attributes) {
         *num_attributes = required;
         pthread_mutex_unlock(&backend->mutex);
@@ -464,11 +479,16 @@ static VAStatus backend_query_config_attributes(
         .type = VAConfigAttribRTFormat,
         .value = VA_RT_FORMAT_YUV420,
     };
-    if (required == 2)
+    if (required == 3) {
         attributes[1] = (VAConfigAttrib) {
             .type = VAConfigAttribRateControl,
             .value = config->rate_control,
         };
+        attributes[2] = (VAConfigAttrib) {
+            .type = VAConfigAttribEncPackedHeaders,
+            .value = config->packed_headers,
+        };
+    }
     *num_attributes = required;
 
     pthread_mutex_unlock(&backend->mutex);
