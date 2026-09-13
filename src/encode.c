@@ -26,6 +26,7 @@ struct venus_h264_encode_parameters {
     uint32_t frames_per_second;
     int8_t slice_qp_delta;
     bool has_slice;
+    bool has_aud;
 };
 
 static int64_t monotonic_milliseconds(void)
@@ -198,6 +199,8 @@ static int collect_parameters(
             if (!packed ||
                 packed->bit_length > buffer_bytes(buffer) * 8)
                 return -EINVAL;
+            if (packed->type == VAEncPackedHeaderRawData)
+                parameters->has_aud = true;
             packed = NULL;
             break;
         case VAEncMiscParameterBufferType:
@@ -767,6 +770,7 @@ static int open_encoder(
         .h264_transform_8x8 =
             parameters->picture->
                 pic_fields.bits.transform_8x8_mode_flag,
+        .h264_aud = parameters->has_aud,
         .capture_buffer_size = v4l2_capture_size,
         .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
         .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
@@ -785,12 +789,13 @@ static int open_encoder(
 
     venus_backend_log(
         backend,
-        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u(auto) size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d range=%u..%u gop=%u output=%u capture=%u",
+        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u(auto) size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d range=%u..%u gop=%u aud=%u output=%u capture=%u",
         context->id, config->profile,
         parameters->sequence->level_idc, level,
         context->encode_width, context->encode_height,
         frames_per_second, config->rate_control,
         bitrate, qp, minimum_qp, maximum_qp, gop_size,
+        parameters->has_aud ? 1u : 0u,
         venus_v4l2_encoder_output_count(context->encoder),
         venus_v4l2_encoder_capture_count(context->encoder));
     return 0;

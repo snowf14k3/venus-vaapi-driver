@@ -48,13 +48,13 @@ if grep -q \
        '\[HWAccel.VAAPI\] Created VAAPI encode session' \
        "${OUT}" &&
    grep -Eq \
-       'venus-vaapi: encoder-open .*bitrate=[0-9]+ qp=22 range=20\.\.24' \
+       'venus-vaapi: encoder-open .*bitrate=[0-9]+ qp=22 range=20\.\.24 .*aud=1' \
        "${OUT}" &&
    [[ -n "${HEADER_TAG}" ]] &&
    grep -Fq \
        "driver-tag=${HEADER_TAG} complete=1" "${OUT}" &&
    grep -Eq \
-       'venus-vaapi: encoded buffer=.*packets=2 .*complete=1' \
+       'venus-vaapi: encoded buffer=.*packets=([2-9]|[1-9][0-9]+) .*complete=1' \
        "${OUT}" &&
    ! grep -Eq \
        'encoder-(open|submit|pump) failed|end-picture encode failed|Failed to (sync surface|map output buffer)' \

@@ -172,6 +172,20 @@ bounds CQP compatibility to QP plus or minus 2, and derives 50,544,000 bit/s
 for this QP 22 native session. The rate remains configurable through
 `VENUS_VAAPI_CQP_BITRATE` without changing GNOME or limiting frame rate.
 
+## 0.10.0 access-unit boundaries
+
+GNOME provides a packed raw AUD header for every picture, but the backend
+previously validated and discarded that request while Venus kept
+`V4L2_CID_MPEG_VIDEO_AU_DELIMITER` disabled. Long P-frame sequences therefore
+reached the client without the access-unit boundary GNOME requested. This is
+a direct contract mismatch consistent with the observed stale rectangular
+updates after large desktop changes.
+
+Version 0.10.0 translates `VAEncPackedHeaderRawData` into the Venus hardware
+AUD control when the encoder session is created. Firmware continues to create
+the actual slice headers, while every returned RDP picture now has an explicit
+H.264 access-unit delimiter.
+
 ## Validation boundary
 
 Host validation must include GCC and Clang builds, all Meson tests, diff

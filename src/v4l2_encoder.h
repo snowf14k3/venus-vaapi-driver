@@ -28,6 +28,7 @@ struct venus_v4l2_encoder_config {
     uint32_t h264_level;
     uint32_t h264_entropy_mode;
     uint32_t h264_transform_8x8;
+    bool h264_aud;
     size_t capture_buffer_size;
     unsigned int output_buffers;
     unsigned int capture_buffers;

@@ -202,6 +202,13 @@ static int set_parameters(
     if (status < 0)
         return status;
 
+    status = set_control(
+        encoder, V4L2_CID_MPEG_VIDEO_AU_DELIMITER,
+        config->h264_aud ? 1 : 0,
+        "S_CTRL(H264_AU_DELIMITER)");
+    if (status < 0)
+        return status;
+
     if (config->rate_control_enabled) {
         if (config->bitrate_mode !=
             V4L2_MPEG_VIDEO_BITRATE_MODE_VBR) {

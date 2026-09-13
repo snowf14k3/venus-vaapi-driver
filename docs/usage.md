@@ -114,6 +114,8 @@ new Venus session errors and a stopped RDP service.
   visible dimensions in either orientation;
 - H.264 encode level selection uses the IRIS1 firmware-auto contract from
   Raphael kernel patch 0029;
+- GNOME's per-frame packed raw header request enables the Venus hardware
+  access-unit delimiter, preserving H.264 frame boundaries for RDP updates;
 - the first raw frame's separate SPS/PPS and IDR CAPTURE packets are joined
   by their V4L2 timestamp before the VA coded buffer becomes ready;
 - the first raw frame is queued before OUTPUT and CAPTURE STREAMON, matching
