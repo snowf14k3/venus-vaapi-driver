@@ -138,6 +138,8 @@ void venus_objects_fill_vtable(struct VADriverVTable *vtable);
 void venus_objects_destroy_all(struct venus_backend *backend);
 void venus_decode_fill_vtable(struct VADriverVTable *vtable);
 void venus_decode_destroy_all(struct venus_backend *backend);
+int venus_decode_store_frame_locked(
+    const struct venus_v4l2_frame *frame, void *opaque);
 
 VAStatus venus_encode_end_picture_locked(
     struct venus_backend *backend, struct venus_context *context,

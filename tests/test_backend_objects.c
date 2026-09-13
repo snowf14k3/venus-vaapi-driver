@@ -69,6 +69,15 @@ int main(void)
     struct venus_context *internal_context;
     struct venus_buffer *first_coded;
     struct venus_buffer *second_coded;
+    struct venus_surface *cropped_surface;
+    uint8_t padded_decode[64 * 48 * 3 / 2];
+    struct venus_v4l2_frame padded_frame = {
+        .data = padded_decode,
+        .size = sizeof(padded_decode),
+        .width = 64,
+        .height = 48,
+        .bytes_per_line = 64,
+    };
     const uint8_t first_packet_data[] = { 0x00, 0x00, 0x01, 0x65 };
     const uint8_t second_packet_data[] = { 0x00, 0x00, 0x01, 0x41 };
     struct venus_v4l2_packet packet = {
@@ -105,6 +114,7 @@ int main(void)
 
     assert(venus_backend_create(
                &capabilities, &context.pDriverData) == VA_STATUS_SUCCESS);
+    backend = context.pDriverData;
     venus_vtable_init(&vtable);
     venus_backend_fill_vtable(&vtable);
 
@@ -143,6 +153,19 @@ int main(void)
     assert(vtable.vaCreateSurfaces2(
                &context, VA_RT_FORMAT_YUV420, 64, 32,
                surfaces, 2, &surface_attribute, 1) == VA_STATUS_SUCCESS);
+
+    memset(padded_decode, 0x3c, sizeof(padded_decode));
+    padded_frame.tag = surfaces[1];
+    assert(venus_decode_store_frame_locked(
+               &padded_frame, backend) == 0);
+    cropped_surface =
+        venus_backend_find_surface(backend, surfaces[1]);
+    assert(cropped_surface != NULL);
+    assert(cropped_surface->width == 64);
+    assert(cropped_surface->height == 32);
+    assert(cropped_surface->data_size == 64 * 32 * 3 / 2);
+    for (index = 0; index < cropped_surface->data_size; index++)
+        assert(cropped_surface->data[index] == 0x3c);
 
     assert(vtable.vaCreateImage(
                &context, &image_format, 64, 32,
@@ -196,7 +219,6 @@ int main(void)
     assert(vtable.vaUnmapBuffer(
                &context, coded_buffers[0]) == VA_STATUS_SUCCESS);
 
-    backend = context.pDriverData;
     internal_context =
         venus_backend_find_context(backend, encode_context);
     first_coded =

@@ -42,38 +42,88 @@ static void destroy_context_buffers(struct venus_backend *backend,
     }
 }
 
-static int store_frame(const struct venus_v4l2_frame *frame,
-                       void *opaque)
+int venus_decode_store_frame_locked(
+    const struct venus_v4l2_frame *frame, void *opaque)
 {
     struct venus_backend *backend = opaque;
     struct venus_surface *surface;
     uint8_t *resized;
+    uint32_t stride;
+    size_t source_luma_size;
+    size_t source_size;
+    size_t destination_luma_size;
+    size_t destination_size;
+    unsigned int row;
 
-    if (frame->tag > UINT32_MAX)
+    if (!frame || frame->tag > UINT32_MAX ||
+        frame->width == 0 || frame->height == 0 ||
+        (frame->width & 1u) || (frame->height & 1u))
         return -EINVAL;
 
     surface = venus_backend_find_surface(
         backend, (VASurfaceID)frame->tag);
     if (!surface)
         return -ENOENT;
+    if (surface->width > frame->width ||
+        surface->height > frame->height)
+        return -EINVAL;
 
-    if (frame->size > surface->capacity) {
-        resized = realloc(surface->data, frame->size);
+    stride = frame->bytes_per_line
+                 ? frame->bytes_per_line
+                 : frame->width;
+    if (stride < frame->width ||
+        stride > SIZE_MAX / frame->height)
+        return -EINVAL;
+
+    source_luma_size = (size_t)stride * frame->height;
+    if (source_luma_size >
+        SIZE_MAX - (size_t)stride * (frame->height / 2))
+        return -EOVERFLOW;
+    source_size =
+        source_luma_size +
+        (size_t)stride * (frame->height / 2);
+    if (frame->size < source_size ||
+        surface->width > SIZE_MAX / surface->height)
+        return -EINVAL;
+
+    destination_luma_size =
+        (size_t)surface->width * surface->height;
+    if (destination_luma_size >
+        SIZE_MAX - destination_luma_size / 2)
+        return -EOVERFLOW;
+    destination_size =
+        destination_luma_size +
+        destination_luma_size / 2;
+
+    if (destination_size > surface->capacity) {
+        resized = realloc(surface->data, destination_size);
         if (!resized)
             return -ENOMEM;
         surface->data = resized;
-        surface->capacity = frame->size;
+        surface->capacity = destination_size;
     }
 
-    memcpy(surface->data, frame->data, frame->size);
-    surface->data_size = frame->size;
-    surface->width = frame->width;
-    surface->height = frame->height;
+    for (row = 0; row < surface->height; row++)
+        memcpy(surface->data +
+                   (size_t)row * surface->width,
+               frame->data + (size_t)row * stride,
+               surface->width);
+
+    for (row = 0; row < surface->height / 2; row++)
+        memcpy(surface->data + destination_luma_size +
+                   (size_t)row * surface->width,
+               frame->data + source_luma_size +
+                   (size_t)row * stride,
+               surface->width);
+
+    surface->data_size = destination_size;
     surface->ready = true;
-    venus_backend_log(backend,
-                      "capture surface=0x%x tag=%llu bytes=%zu size=%ux%u",
-                      surface->id, (unsigned long long)frame->tag,
-                      frame->size, frame->width, frame->height);
+    venus_backend_log(
+        backend,
+        "capture surface=0x%x tag=%llu bytes=%zu visible=%ux%u coded=%ux%u stride=%u",
+        surface->id, (unsigned long long)frame->tag,
+        destination_size, surface->width, surface->height,
+        frame->width, frame->height, stride);
     return 0;
 }
 
@@ -485,7 +535,7 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
                       access_unit_size);
     status = venus_v4l2_decoder_submit(
         context->decoder, access_unit, access_unit_size,
-        context->target, store_frame, backend);
+        context->target, venus_decode_store_frame_locked, backend);
 
 finish:
     free(access_unit);
@@ -523,7 +573,8 @@ static VAStatus sync_surface_locked(struct venus_backend *backend,
     while (!surface->ready &&
            monotonic_milliseconds() < deadline) {
         int status = venus_v4l2_decoder_pump(
-            context->decoder, 1000, store_frame, backend, NULL);
+            context->decoder, 1000,
+            venus_decode_store_frame_locked, backend, NULL);
 
         if (status == -ETIMEDOUT || status == -EAGAIN)
             continue;
