@@ -6,12 +6,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct venus_v4l2_decoder;
+#include "v4l2_common.h"
 
-struct venus_v4l2_error {
-    int code;
-    char operation[64];
-};
+struct venus_v4l2_decoder;
 
 struct venus_v4l2_decoder_config {
     const char *device;

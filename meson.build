@@ -38,6 +38,10 @@ stateful_sources = files(
   'src/v4l2_decoder.c',
 )
 
+encoder_sources = files(
+  'src/v4l2_encoder.c',
+)
+
 driver_sources = common_sources + codec_sources + stateful_sources + files(
   'src/backend.c',
   'src/decode.c',
@@ -68,6 +72,14 @@ executable(
 executable(
   'venus-v4l2-decode',
   common_sources + stateful_sources + files('tools/venus-v4l2-decode.c'),
+  include_directories: project_inc,
+  dependencies: [threads_dep],
+  install: false,
+)
+
+executable(
+  'venus-v4l2-encode',
+  common_sources + encoder_sources + files('tools/venus-v4l2-encode.c'),
   include_directories: project_inc,
   dependencies: [threads_dep],
   install: false,

@@ -17,6 +17,12 @@ v4l2_decoder_test = executable(
   include_directories: project_inc,
 )
 
+v4l2_encoder_test = executable(
+  'test-v4l2-encoder',
+  encoder_sources + files('test_v4l2_encoder.c'),
+  include_directories: project_inc,
+)
+
 h264_annexb_test = executable(
   'test-h264-annexb',
   codec_sources + files('test_h264_annexb.c'),
@@ -48,6 +54,7 @@ driver_load_test = executable(
 test('capabilities', capabilities_test)
 test('annexb-split', annexb_split_test)
 test('v4l2-decoder', v4l2_decoder_test)
+test('v4l2-encoder', v4l2_encoder_test)
 test('h264-annexb', h264_annexb_test)
 test('backend-objects', backend_objects_test)
 test('driver-init', driver_init_test)

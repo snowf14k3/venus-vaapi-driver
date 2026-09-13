@@ -62,6 +62,13 @@ The encoder queues raw VA surfaces on V4L2 OUTPUT and returns complete coded
 chunks through V4L2 CAPTURE. VA sequence, picture, slice and miscellaneous
 parameters are translated to V4L2 controls before streaming.
 
+`venus-v4l2-encode` isolates that stateful session before VA integration. The
+first test fixes the input to progressive 640x480 NV12, Baseline profile,
+1 Mbit/s, 15 fps, a 15-frame GOP and no B frames. It requests four raw OUTPUT
+buffers and sixteen encoded CAPTURE buffers, then drains with
+`V4L2_ENC_CMD_STOP` and requires the emitted H.264 stream to decode to all 30
+frames in software.
+
 ## Surface plan
 
 1. CPU-visible linear NV12 surfaces for the first correctness milestone.

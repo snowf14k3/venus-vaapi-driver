@@ -23,7 +23,9 @@ The repository currently provides:
 - an isolated V4L2 stateful decoder session and `venus-v4l2-decode` tool for
   validating queue order, MMAP buffers, source-change events and drain;
 - experimental H.264 Baseline/Main/High VLD config, context, buffer, surface,
-  sync and NV12 image-download paths backed by that same session.
+  sync and NV12 image-download paths backed by that same session;
+- an isolated H.264 stateful encoder session for validating NV12 input,
+  V4L2 controls, encoded CAPTURE packets and drain before VA integration.
 
 Debian 13 ships libva 2.22. A driver built against libva 1.20 remains loadable
 because libva searches compatible lower minor-version init symbols.
@@ -32,7 +34,7 @@ because libva searches compatible lower minor-version init symbols.
 
 | Codec | Decode | Encode |
 | --- | --- | --- |
-| H.264 Baseline/Main/High | Baseline validated; Main/High pending | next milestone |
+| H.264 Baseline/Main/High | Baseline validated; Main/High pending | V4L2 session candidate |
 | HEVC Main 8-bit | planned | planned |
 | VP8 | planned | planned |
 | VP9 Profile 0 | planned | not exposed |
@@ -84,6 +86,16 @@ sudo ./tests/run-vaapi-h264.sh
 This runs `vainfo`, decodes the same 30-frame stream through FFmpeg VA-API and
 `hwdownload`, compares every NV12 byte, and enables userspace backend tracing
 for the test only.
+
+Validate the isolated H.264 encoder session:
+
+```bash
+sudo ./tests/run-v4l2-h264-encode.sh
+```
+
+The encoder test generates 30 NV12 frames, encodes them through the project's
+own V4L2 session, drains the device and requires software decoding to recover
+all 30 frames.
 
 Test driver loading after the first codec profile is implemented:
 
