@@ -5,6 +5,13 @@ capabilities_test = executable(
   dependencies: [threads_dep],
 )
 
+h264_annexb_test = executable(
+  'test-h264-annexb',
+  codec_sources + files('test_h264_annexb.c'),
+  include_directories: project_inc,
+  dependencies: [libva_dep],
+)
+
 driver_init_test = executable(
   'test-driver-init',
   driver_sources + files('test_driver_init.c'),
@@ -20,6 +27,7 @@ driver_load_test = executable(
 )
 
 test('capabilities', capabilities_test)
+test('h264-annexb', h264_annexb_test)
 test('driver-init', driver_init_test)
 test('driver-load', driver_load_test, args: [venus_driver])
 

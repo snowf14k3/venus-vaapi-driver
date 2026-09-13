@@ -28,7 +28,12 @@ common_sources = files(
   'src/v4l2_probe.c',
 )
 
-driver_sources = common_sources + files(
+codec_sources = files(
+  'src/bit_writer.c',
+  'src/h264_annexb.c',
+)
+
+driver_sources = common_sources + codec_sources + files(
   'src/driver.c',
   'src/va_stubs.c',
 )

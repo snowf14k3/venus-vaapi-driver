@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: MIT
+#include "bit_writer.h"
+
+#include <limits.h>
+#include <string.h>
+
+void venus_bits_init(struct venus_bit_writer *writer, uint8_t *data,
+                     size_t capacity)
+{
+    writer->data = data;
+    writer->capacity = capacity;
+    writer->bit_count = 0;
+    writer->overflow = !data || capacity == 0;
+
+    if (data && capacity)
+        memset(data, 0, capacity);
+}
+
+static void write_one(struct venus_bit_writer *writer, bool value)
+{
+    size_t byte;
+    unsigned int shift;
+
+    if (writer->overflow)
+        return;
+
+    byte = writer->bit_count / CHAR_BIT;
+    if (byte >= writer->capacity) {
+        writer->overflow = true;
+        return;
+    }
+
+    shift = CHAR_BIT - 1 - (writer->bit_count % CHAR_BIT);
+    if (value)
+        writer->data[byte] |= (uint8_t)(1u << shift);
+    writer->bit_count++;
+}
+
+void venus_bits_write(struct venus_bit_writer *writer, uint32_t value,
+                      unsigned int bits)
+{
+    unsigned int index;
+
+    if (!writer || bits > 32) {
+        if (writer)
+            writer->overflow = true;
+        return;
+    }
+
+    for (index = bits; index > 0; index--)
+        write_one(writer, ((value >> (index - 1)) & 1u) != 0);
+}
+
+void venus_bits_write_ue(struct venus_bit_writer *writer, uint32_t value)
+{
+    uint64_t code_num = (uint64_t)value + 1;
+    uint64_t cursor = code_num;
+    unsigned int leading_zero_bits = 0;
+
+    while (cursor > 1) {
+        cursor >>= 1;
+        leading_zero_bits++;
+    }
+
+    while (leading_zero_bits > 0) {
+        write_one(writer, false);
+        leading_zero_bits--;
+    }
+
+    leading_zero_bits = 0;
+    cursor = code_num;
+    while (cursor > 1) {
+        cursor >>= 1;
+        leading_zero_bits++;
+    }
+
+    write_one(writer, true);
+    while (leading_zero_bits > 0) {
+        leading_zero_bits--;
+        write_one(writer, ((code_num >> leading_zero_bits) & 1u) != 0);
+    }
+}
+
+void venus_bits_write_se(struct venus_bit_writer *writer, int32_t value)
+{
+    uint64_t code_num;
+
+    if (value <= 0)
+        code_num = (uint64_t)(-(int64_t)value) * 2;
+    else
+        code_num = (uint64_t)value * 2 - 1;
+
+    if (code_num > UINT32_MAX) {
+        writer->overflow = true;
+        return;
+    }
+
+    venus_bits_write_ue(writer, (uint32_t)code_num);
+}
+
+void venus_bits_finish_rbsp(struct venus_bit_writer *writer)
+{
+    write_one(writer, true);
+    while (!writer->overflow && writer->bit_count % CHAR_BIT)
+        write_one(writer, false);
+}
+
+size_t venus_bits_size(const struct venus_bit_writer *writer)
+{
+    if (!writer || writer->overflow)
+        return 0;
+
+    return (writer->bit_count + CHAR_BIT - 1) / CHAR_BIT;
+}
+
+bool venus_bits_ok(const struct venus_bit_writer *writer)
+{
+    return writer && !writer->overflow;
+}

@@ -71,3 +71,17 @@ parameters are translated to V4L2 controls before streaming.
 
 The first milestone intentionally prioritizes byte-correct H.264 decode over
 zero-copy presentation.
+
+## H.264 bytestream reconstruction
+
+FFmpeg submits the original slice NAL bytes through `VASliceDataBufferType`,
+but VA-API does not forward the original SPS and PPS NAL units to a VLD
+backend. The H.264 adapter therefore reconstructs a conservative SPS/PPS from
+`VAPictureParameterBufferH264` and the first
+`VASliceParameterBufferH264`, applies emulation prevention, and prefixes every
+NAL with an Annex-B start code.
+
+The initial writer accepts progressive 8-bit 4:2:0 streams using picture order
+count types 0 or 2. Interlaced streams, 10-bit streams, FMO, picture order
+count type 1 and custom scaling matrices remain disabled until dedicated
+coverage exists.

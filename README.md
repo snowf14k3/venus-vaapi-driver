@@ -17,7 +17,9 @@ The repository currently provides:
 - a validated codec allowlist independent from generic kernel format tables;
 - `venus-vaapi-info` for inspecting the live V4L2 devices;
 - host tests for the allowlist, no-device behavior, driver initialization and
-  exported ABI symbol.
+  exported ABI symbol;
+- a bounded H.264 Annex-B assembler that reconstructs conservative SPS/PPS
+  NAL units and validates every VA slice range before copying it.
 
 Debian 13 ships libva 2.22. A driver built against libva 1.20 remains loadable
 because libva searches compatible lower minor-version init symbols.
