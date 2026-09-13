@@ -5,8 +5,8 @@ initially targeting Xiaomi Redmi K20 Pro / Mi 9T Pro (Raphael, SM8150).
 
 ## Current status
 
-**Experimental H.264 VLD integration. Encoding and the other decode profiles
-remain disabled.**
+**H.264 VLD is validated for progressive 8-bit Baseline at 640x480. Encoding
+and the other decode codecs remain disabled.**
 
 The repository currently provides:
 
@@ -32,14 +32,14 @@ because libva searches compatible lower minor-version init symbols.
 
 | Codec | Decode | Encode |
 | --- | --- | --- |
-| H.264 Baseline/Main/High | first milestone | after decode |
+| H.264 Baseline/Main/High | Baseline validated; Main/High pending | next milestone |
 | HEVC Main 8-bit | planned | planned |
 | VP8 | planned | planned |
 | VP9 Profile 0 | planned | not exposed |
 
-The `h264-vld` branch advertises H.264 for device validation. It will not be
-merged into `main` until the full VA submission path passes byte-exact hardware
-tests. Other profiles remain hidden.
+The initial H.264 path passed a 30-frame byte-exact VA-API hardware test on
+Raphael. See [device validation](docs/device-validation.md). Other codec
+profiles remain hidden until their own submission paths pass the same test.
 
 ## Build
 
@@ -110,9 +110,9 @@ into userspace.
 See [docs/architecture.md](docs/architecture.md) for the interface boundary,
 capability policy and implementation stages.
 
-## Initial validation target
+## Completed first milestone
 
-The first functional milestone is H.264 VLD:
+The H.264 VLD milestone completed:
 
 1. load the backend through libva;
 2. create CPU-visible NV12 surfaces;
