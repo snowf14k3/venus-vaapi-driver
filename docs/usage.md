@@ -101,8 +101,10 @@ session messages together with the driver's `encoder-open` and
 ## Current limits
 
 - progressive H.264 8-bit encoding and decoding;
-- CBR encoding with no B frames; VA CQP requests are translated to a
-  resolution-aware CBR target because IRIS1 rejects rate-control-off sessions;
+- CBR encoding with no B frames; VA CQP requests are translated to the
+  resolution-aware VBR path used by FFmpeg because IRIS1 rejects
+  rate-control-off sessions and high-load CBR requires downstream-only
+  VBV/low-latency properties;
 - GNOME Remote Desktop uses `VENUS_VAAPI_NATIVE_MODE=1080x2340` to
   translate its macroblock-aligned surfaces back to the Raphael panel's
   visible dimensions in either orientation;
