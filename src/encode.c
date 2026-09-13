@@ -452,6 +452,13 @@ static int open_encoder(
     level = level_to_v4l2(parameters->sequence->level_idc);
     if (level == UINT32_MAX)
         return -ENOTSUP;
+    /*
+     * IRIS1 accepts lower H.264 level controls but rejects the session
+     * when the first raw buffer activates firmware.  Level 3.1 is the
+     * lowest level validated for this H.264 High encoder path.
+     */
+    if (level < V4L2_MPEG_VIDEO_H264_LEVEL_3_1)
+        level = V4L2_MPEG_VIDEO_H264_LEVEL_3_1;
 
     status = venus_encode_h264_dimensions(
         parameters->sequence, &encode_width, &encode_height);
@@ -552,9 +559,9 @@ static int open_encoder(
 
     venus_backend_log(
         backend,
-        "encoder-open context=0x%x profile=%d level=%u size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u output=%u capture=%u",
+        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u output=%u capture=%u",
         context->id, config->profile,
-        parameters->sequence->level_idc,
+        parameters->sequence->level_idc, level,
         context->encode_width, context->encode_height,
         frames_per_second, config->rate_control,
         bitrate, qp, gop_size,
