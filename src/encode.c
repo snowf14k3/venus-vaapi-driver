@@ -438,6 +438,7 @@ static int open_encoder(
     uint32_t profile = profile_to_v4l2(config->profile);
     uint32_t level;
     uint32_t bitrate = parameters->bitrate;
+    bool bitrate_supplied;
     uint32_t frames_per_second = parameters->frames_per_second;
     uint32_t encode_width;
     uint32_t encode_height;
@@ -470,10 +471,9 @@ static int open_encoder(
 
     if (bitrate == 0)
         bitrate = parameters->sequence->bits_per_second;
+    bitrate_supplied = bitrate != 0;
     if (bitrate == 0)
         bitrate = VENUS_ENCODE_DEFAULT_BITRATE;
-    if (bitrate > INT_MAX)
-        return -ERANGE;
 
     if (frames_per_second == 0 &&
         parameters->sequence->
@@ -491,6 +491,22 @@ static int open_encoder(
     }
     if (frames_per_second == 0)
         frames_per_second = VENUS_ENCODE_DEFAULT_FPS;
+
+    if (config->rate_control == VA_RC_CQP &&
+        !bitrate_supplied) {
+        uint64_t suggested =
+            (uint64_t)encode_width * encode_height *
+            frames_per_second / 12u;
+
+        if (suggested < VENUS_ENCODE_DEFAULT_BITRATE)
+            suggested = VENUS_ENCODE_DEFAULT_BITRATE;
+        if (suggested > 120000000u)
+            suggested = 120000000u;
+        bitrate = (uint32_t)suggested;
+    }
+    if (bitrate > INT_MAX)
+        return -ERANGE;
+
     if ((context->width / 16u) *
             (context->height / 16u) >
         VENUS_H264_MAX_MACROBLOCKS_PER_SECOND /
@@ -510,10 +526,13 @@ static int open_encoder(
     if (qp < 1 || qp > 51)
         return -EINVAL;
 
-    bitrate_mode =
-        config->rate_control == VA_RC_CBR
-            ? V4L2_MPEG_VIDEO_BITRATE_MODE_CBR
-            : V4L2_MPEG_VIDEO_BITRATE_MODE_VBR;
+    /*
+     * IRIS1 rejects H.264 sessions with frame rate control disabled
+     * when the first OUTPUT buffer is queued.  Translate VA CQP to
+     * the validated Venus CBR path while preserving the requested QP
+     * in VA metadata.
+     */
+    bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
 
     context->encode_width = encode_width;
     context->encode_height = encode_height;
@@ -525,8 +544,7 @@ static int open_encoder(
         .height = encode_height,
         .frames_per_second = frames_per_second,
         .bitrate = bitrate,
-        .rate_control_enabled =
-            config->rate_control != VA_RC_CQP,
+        .rate_control_enabled = true,
         .bitrate_mode = bitrate_mode,
         .h264_i_qp = (uint32_t)qp,
         .h264_p_qp = (uint32_t)qp,
