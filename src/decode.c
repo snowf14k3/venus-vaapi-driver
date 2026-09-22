@@ -180,6 +180,7 @@ static VAStatus backend_create_context(
     context->backend = backend;
     context->height = (unsigned int)picture_height;
     context->target = VA_INVALID_ID;
+    context->encode_delivery_sequence = 1;
 
     for (index = 0; index < (unsigned int)num_render_targets; index++) {
         struct venus_surface *surface =

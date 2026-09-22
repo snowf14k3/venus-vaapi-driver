@@ -114,6 +114,7 @@ struct venus_context {
     size_t encode_queue_head;
     size_t encode_queue_count;
     uint64_t encode_sequence;
+    uint64_t encode_delivery_sequence;
 };
 
 struct venus_backend {

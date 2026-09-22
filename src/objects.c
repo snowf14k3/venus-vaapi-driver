@@ -784,6 +784,58 @@ static struct venus_surface *surface_for_image_buffer(
     return NULL;
 }
 
+static VAStatus wait_coded_delivery_locked(
+    struct venus_backend *backend, struct venus_buffer **buffer_ptr)
+{
+    struct venus_buffer *buffer = *buffer_ptr;
+    struct venus_context *context;
+    unsigned int attempts = 0;
+
+    context = venus_backend_find_context(
+        backend, buffer->context_id);
+    if (!context || buffer->coded_tag == 0)
+        return VA_STATUS_ERROR_INVALID_CONTEXT;
+
+    while (buffer->map_count == 0 &&
+           buffer->coded_tag !=
+               context->encode_delivery_sequence) {
+        VABufferID buffer_id = buffer->id;
+
+        if (buffer->coded_tag <
+            context->encode_delivery_sequence)
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        if (attempts++ >= 5000)
+            return VA_STATUS_ERROR_HW_BUSY;
+
+        pthread_mutex_unlock(&backend->mutex);
+        usleep(1000);
+        pthread_mutex_lock(&backend->mutex);
+
+        buffer = venus_backend_find_buffer(backend, buffer_id);
+        context = buffer
+                      ? venus_backend_find_context(
+                            backend, buffer->context_id)
+                      : NULL;
+        if (!buffer || !context)
+            return VA_STATUS_ERROR_INVALID_BUFFER;
+    }
+
+    if (buffer->map_count == 0) {
+        venus_backend_log(
+            backend,
+            "deliver-coded buffer=0x%x tag=%llu expected=%llu bytes=%zu",
+            buffer->id,
+            (unsigned long long)buffer->coded_tag,
+            (unsigned long long)
+                context->encode_delivery_sequence,
+            buffer->coded_size);
+        context->encode_delivery_sequence++;
+    }
+
+    *buffer_ptr = buffer;
+    return VA_STATUS_SUCCESS;
+}
+
 static VAStatus backend_map_buffer(VADriverContextP context,
                                    VABufferID buffer_id,
                                    void **mapped)
@@ -804,14 +856,24 @@ static VAStatus backend_map_buffer(VADriverContextP context,
         return VA_STATUS_ERROR_INVALID_BUFFER;
     }
 
-    if (buffer->type == VAEncCodedBufferType &&
-        !buffer->coded_ready) {
-        VAStatus sync_status =
-            venus_encode_sync_buffer_locked(backend, buffer, 5000);
+    if (buffer->type == VAEncCodedBufferType) {
+        VAStatus sync_status;
+        VAStatus delivery_status;
 
-        if (sync_status != VA_STATUS_SUCCESS) {
+        if (!buffer->coded_ready) {
+            sync_status = venus_encode_sync_buffer_locked(
+                backend, buffer, 5000);
+            if (sync_status != VA_STATUS_SUCCESS) {
+                pthread_mutex_unlock(&backend->mutex);
+                return sync_status;
+            }
+        }
+
+        delivery_status = wait_coded_delivery_locked(
+            backend, &buffer);
+        if (delivery_status != VA_STATUS_SUCCESS) {
             pthread_mutex_unlock(&backend->mutex);
-            return sync_status;
+            return delivery_status;
         }
     }
 
