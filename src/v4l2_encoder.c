@@ -913,26 +913,33 @@ int venus_v4l2_encoder_submit_dmabuf(
         .length = 1,
         .m.planes = planes,
     };
-    uint32_t expected_stride;
     uint32_t required_size;
+    size_t layout_size;
+    size_t chroma_scanlines;
     int imported_fd;
     int index;
     int status;
 
     if (!encoder || encoder->output_memory != V4L2_MEMORY_DMABUF ||
         dma_fd < 0 || dma_size == 0 || dma_size > UINT32_MAX ||
-        stride == 0 || scanlines < encoder->visible_height ||
+        stride < encoder->visible_width ||
+        scanlines < encoder->visible_height ||
         uv_offset != (size_t)stride * scanlines)
         return -EINVAL;
 
-    expected_stride =
-        encoder->output_format.plane_fmt[0].bytesperline;
-    if (expected_stride == 0)
-        expected_stride = encoder->visible_width;
     required_size =
         encoder->output_format.plane_fmt[0].sizeimage;
-    if (stride != expected_stride || required_size == 0 ||
-        dma_size < required_size)
+    chroma_scanlines =
+        ((size_t)encoder->visible_height / 2u + 15u) /
+        16u * 16u;
+    if (stride > SIZE_MAX / chroma_scanlines ||
+        uv_offset > SIZE_MAX -
+                        (size_t)stride * chroma_scanlines)
+        return -EOVERFLOW;
+    layout_size =
+        uv_offset + (size_t)stride * chroma_scanlines;
+    if (required_size == 0 || dma_size < required_size ||
+        dma_size < layout_size)
         return -EINVAL;
 
     index = find_free_output(encoder, callback, opaque);
