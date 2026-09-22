@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -154,17 +155,67 @@ static int allocate_dma_surface(struct venus_surface *surface,
     return 0;
 }
 
+static int wait_surface_access(const struct venus_surface *surface,
+                               short events)
+{
+    struct pollfd fence;
+    unsigned int attempts;
+
+    if (!surface || !surface->dma_backed)
+        return 0;
+    if (surface->dma_fd < 0)
+        return -EBADF;
+
+    fence = (struct pollfd) {
+        .fd = surface->dma_fd,
+        .events = events,
+    };
+    for (attempts = 0; attempts < 50; attempts++) {
+        int result;
+
+        do {
+            result = poll(&fence, 1, 100);
+        } while (result < 0 && errno == EINTR);
+        if (result < 0)
+            return -errno;
+        if (result == 0)
+            continue;
+        if (fence.revents & (POLLERR | POLLHUP | POLLNVAL))
+            return -EIO;
+        if (fence.revents & events)
+            return 0;
+    }
+
+    return -ETIMEDOUT;
+}
+
 static int surface_cpu_sync(struct venus_surface *surface,
                             uint64_t flags)
 {
     struct dma_buf_sync sync = {
         .flags = flags,
     };
+    int status;
 
     if (!surface || !surface->dma_backed)
         return 0;
     if (surface->dma_fd < 0)
         return -EBADF;
+
+    /*
+     * DMA_BUF_IOCTL_SYNC provides cache coherency, but does not replace
+     * waiting for a GPU writer or reader attached to the DMA-BUF reservation.
+     * Vulkan writes exported VA surfaces asynchronously, so wait before
+     * exposing the mapping to the CPU.
+     */
+    if (!(flags & DMA_BUF_SYNC_END)) {
+        status = wait_surface_access(
+            surface,
+            flags & DMA_BUF_SYNC_WRITE ? POLLOUT : POLLIN);
+        if (status < 0)
+            return status;
+    }
+
     if (xioctl(surface->dma_fd, DMA_BUF_IOCTL_SYNC,
                &sync) < 0)
         return -errno;
@@ -751,6 +802,17 @@ static VAStatus backend_map_buffer(VADriverContextP context,
     if (!buffer || buffer->map_count == UINT_MAX) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_BUFFER;
+    }
+
+    if (buffer->type == VAEncCodedBufferType &&
+        !buffer->coded_ready) {
+        VAStatus sync_status =
+            venus_encode_sync_buffer_locked(backend, buffer, 5000);
+
+        if (sync_status != VA_STATUS_SUCCESS) {
+            pthread_mutex_unlock(&backend->mutex);
+            return sync_status;
+        }
     }
 
     surface = surface_for_image_buffer(backend, buffer_id);

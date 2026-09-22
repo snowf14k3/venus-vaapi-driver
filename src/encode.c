@@ -19,7 +19,6 @@
 #define VENUS_ENCODE_DEFAULT_BITRATE 1000000u
 #define VENUS_ENCODE_MAX_BITRATE 160000000u
 #define VENUS_ENCODE_DEFAULT_FPS 30u
-#define VENUS_ENCODE_DEFAULT_GOP 60u
 
 struct venus_h264_encode_parameters {
     const VAEncSequenceParameterBufferH264 *sequence;
@@ -777,7 +776,7 @@ static int open_encoder(
     if (gop_size == 0)
         gop_size = parameters->sequence->intra_period;
     if (gop_size == 0)
-        gop_size = VENUS_ENCODE_DEFAULT_GOP;
+        gop_size = INT_MAX;
     if (environment_flag_enabled("VENUS_VAAPI_INTRA_ONLY"))
         gop_size = 1;
 
