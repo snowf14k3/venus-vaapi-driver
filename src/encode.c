@@ -738,10 +738,12 @@ static int open_encoder(
 
     /*
      * IRIS1 rejects H.264 sessions with frame rate control disabled.
-     * Translate VA CQP to the validated CBR path.  The Raphael kernel
-     * supplies the matching IRIS1 VBV, low-latency and work-mode contract.
+     * Keep frame RC enabled for both VA CBR and CQP compatibility, but use
+     * the firmware's VBR route.  The CBR route substantially undershoots
+     * the requested bitrate on SM8150 and produces visible block damage,
+     * while the current Raphael VBR lifecycle is stable at the same sizes.
      */
-    bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
+    bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR;
 
     context->encode_width = encode_width;
     context->encode_height = encode_height;

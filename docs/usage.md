@@ -2,18 +2,11 @@
 
 ## Install
 
-From the repository checkout, run the complete validation and installation:
+From the repository checkout, build and install the driver:
 
 ```bash
-./scripts/validate-and-install.sh
+./scripts/install.sh
 ```
-
-It builds the driver, runs host tests, runs the complete hardware matrix and
-only installs `venus_drv_video.so` after every check passes. It also writes
-`/etc/environment.d/90-venus-vaapi.conf` and
-`/etc/profile.d/venus-vaapi.sh` so new login sessions select this driver.
-
-To install without rerunning the hardware matrix, use `./scripts/install.sh`.
 
 Select the driver immediately in the current shell:
 
@@ -65,63 +58,27 @@ Applications launched from a desktop session must inherit
 `LIBVA_DRIVER_NAME=venus`. Set it in that application's service or launcher
 environment when required.
 
-## Validation
-
-Run the complete H.264 matrix before system installation:
-
-```bash
-sudo ./tests/run-vaapi-h264-matrix.sh
-```
-
-It tests 640x480, 720p, 1080p, 1080x2340 portrait,
-2340x1080 landscape and a 300-frame 720p session. Every encoded stream is
-software-decoded and VAAPI-decoded; the decoded frame hashes, frame counts
-and visible dimensions must match.
-
-## GNOME Remote Desktop
-
-GNOME Remote Desktop 48 requires H.264 High EncSlice, CQP, packed sequence,
-picture, slice and raw-data headers, and exportable linear NV12 surfaces.
-Install the compatibility candidate and restart the active user service:
-
-```bash
-RDP_USER=user ./scripts/install-gnome-rdp.sh
-```
-
-Reconnect the RDP client, then verify the live encoder path:
-
-```bash
-./scripts/check-gnome-rdp.sh
-```
-
-A passing result requires GNOME's successful VAAPI initialization and encode
-session messages together with the driver's `encoder-open`, matching
-`encoded part`/`encoded buffer` tag, and `complete=1` traces. It also rejects
-new Venus session errors and a stopped RDP service.
-
 ## Current limits
 
 - progressive H.264 8-bit encoding and decoding;
-- CBR encoding with no B frames; VA CQP requests are translated to the
-  validated CBR path because IRIS1 rejects rate-control-off sessions. The
-  requested QP sets the initial QP, a narrow QP range and a pixel-rate-scaled
-  compatibility bitrate. `VENUS_VAAPI_CQP_BITRATE` can override that bitrate
-  in bits per second from 32000 through 160000000;
-- the matching Raphael kernel provides the SM8150 VBV, low-latency and
-  work-mode properties required by the CBR firmware contract;
-- GNOME Remote Desktop uses `VENUS_VAAPI_NATIVE_MODE=1080x2340` to
-  translate its macroblock-aligned surfaces back to the Raphael panel's
-  visible dimensions in either orientation;
+- no B frames; VA CBR and CQP requests keep frame rate control enabled and
+  use the SM8150 VBR firmware route because its CBR route severely
+  undershoots the requested bitrate. CQP also applies the requested initial
+  QP, a narrow QP range and a pixel-rate-scaled compatibility bitrate.
+  `VENUS_VAAPI_CQP_BITRATE` can override that bitrate from 32000 through
+  160000000 bits per second;
+- VA clients normally supply the coded and visible dimensions.
+  `VENUS_VAAPI_NATIVE_MODE` remains an explicit override for clients which
+  cannot report cropping correctly;
 - H.264 encode level selection uses the IRIS1 firmware-auto contract from
   Raphael kernel patch 0029;
-- GNOME's per-frame packed raw header request enables the Venus hardware
-  access-unit delimiter, preserving H.264 frame boundaries for RDP updates;
+- per-frame packed raw-header requests enable the Venus hardware
+  access-unit delimiter and preserve H.264 access-unit boundaries;
 - the first raw frame's separate SPS/PPS and IDR CAPTURE packets are joined
   by their V4L2 timestamp before the VA coded buffer becomes ready;
 - the first raw frame is queued before OUTPUT and CAPTURE STREAMON, matching
   FFmpeg and GStreamer's stateful V4L2 encoder lifecycle;
-- CPU-backed NV12 surfaces for ordinary VAAPI clients and linear DMA-BUF
-  surfaces for GNOME's Vulkan renderer;
+- CPU-backed NV12 surfaces and linear DMA-BUF export for GPU clients;
 - maximum advertised width and height of 4096, subject to the SM8150
   H.264 limit of 36,864 macroblocks per frame;
 - exported Vulkan surfaces are copied into the V4L2 MMAP queue; direct

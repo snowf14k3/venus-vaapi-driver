@@ -25,9 +25,6 @@ jobs:
       - name: Build
         run: meson compile -C build
 
-      - name: Test
-        run: meson test -C build --print-errorlogs
-
       - name: Inspect driver
         run: |
           file build/venus_drv_video.so

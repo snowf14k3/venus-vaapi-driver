@@ -47,13 +47,9 @@ int venus_decode_store_frame_locked(
 {
     struct venus_backend *backend = opaque;
     struct venus_surface *surface;
-    uint8_t *resized;
     uint32_t stride;
-    size_t source_luma_size;
-    size_t source_size;
-    size_t destination_luma_size;
-    size_t destination_size;
-    unsigned int row;
+    size_t source_uv_offset;
+    int status;
 
     if (!frame || frame->tag > UINT32_MAX ||
         frame->width == 0 || frame->height == 0 ||
@@ -74,55 +70,19 @@ int venus_decode_store_frame_locked(
     if (stride < frame->width ||
         stride > SIZE_MAX / frame->height)
         return -EINVAL;
+    source_uv_offset = (size_t)stride * frame->height;
 
-    source_luma_size = (size_t)stride * frame->height;
-    if (source_luma_size >
-        SIZE_MAX - (size_t)stride * (frame->height / 2))
-        return -EOVERFLOW;
-    source_size =
-        source_luma_size +
-        (size_t)stride * (frame->height / 2);
-    if (frame->size < source_size ||
-        surface->width > SIZE_MAX / surface->height)
-        return -EINVAL;
+    status = venus_surface_copy_from_nv12(
+        surface, frame->data, frame->size, stride,
+        source_uv_offset, surface->width, surface->height);
+    if (status < 0)
+        return status;
 
-    destination_luma_size =
-        (size_t)surface->width * surface->height;
-    if (destination_luma_size >
-        SIZE_MAX - destination_luma_size / 2)
-        return -EOVERFLOW;
-    destination_size =
-        destination_luma_size +
-        destination_luma_size / 2;
-
-    if (destination_size > surface->capacity) {
-        resized = realloc(surface->data, destination_size);
-        if (!resized)
-            return -ENOMEM;
-        surface->data = resized;
-        surface->capacity = destination_size;
-    }
-
-    for (row = 0; row < surface->height; row++)
-        memcpy(surface->data +
-                   (size_t)row * surface->width,
-               frame->data + (size_t)row * stride,
-               surface->width);
-
-    for (row = 0; row < surface->height / 2; row++)
-        memcpy(surface->data + destination_luma_size +
-                   (size_t)row * surface->width,
-               frame->data + source_luma_size +
-                   (size_t)row * stride,
-               surface->width);
-
-    surface->data_size = destination_size;
-    surface->ready = true;
     venus_backend_log(
         backend,
         "capture surface=0x%x tag=%llu bytes=%zu visible=%ux%u coded=%ux%u stride=%u",
         surface->id, (unsigned long long)frame->tag,
-        destination_size, surface->width, surface->height,
+        surface->data_size, surface->width, surface->height,
         frame->width, frame->height, stride);
     return 0;
 }

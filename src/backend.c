@@ -289,7 +289,7 @@ static VAStatus backend_get_config_attributes(
         case VAConfigAttribRateControl:
             attributes[index].value =
                 entrypoint == VAEntrypointEncSlice
-                    ? VA_RC_CBR | VA_RC_CQP
+                    ? VA_RC_VBR | VA_RC_CBR | VA_RC_CQP
                     : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncPackedHeaders:
@@ -339,7 +339,7 @@ static VAStatus backend_create_config(
 {
     struct venus_backend *backend = venus_backend_from_context(context);
     uint32_t rate_control =
-        entrypoint == VAEntrypointEncSlice ? VA_RC_CBR : 0;
+        entrypoint == VAEntrypointEncSlice ? VA_RC_VBR : 0;
     uint32_t packed_headers = 0;
     unsigned int index;
     int attribute;
@@ -371,7 +371,8 @@ static VAStatus backend_create_config(
         }
         if (entrypoint == VAEntrypointEncSlice &&
             attributes[attribute].type == VAConfigAttribRateControl) {
-            if (attributes[attribute].value != VA_RC_CBR &&
+            if (attributes[attribute].value != VA_RC_VBR &&
+                attributes[attribute].value != VA_RC_CBR &&
                 attributes[attribute].value != VA_RC_CQP) {
                 pthread_mutex_unlock(&backend->mutex);
                 return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;

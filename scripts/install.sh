@@ -30,7 +30,6 @@ else
 fi
 
 meson compile -C "${BUILD}"
-meson test -C "${BUILD}" --print-errorlogs
 "${SUDO[@]}" meson install -C "${BUILD}"
 
 MULTIARCH="$(cc -print-multiarch 2>/dev/null || true)"

@@ -75,6 +75,7 @@ struct venus_buffer {
     size_t num_elements;
     uint8_t *data;
     bool owns_data;
+    unsigned int map_count;
     bool coded_ready;
     size_t coded_size;
     unsigned int coded_packets;
@@ -153,6 +154,20 @@ struct venus_image *venus_backend_find_image(
 void venus_backend_free_buffer(struct venus_buffer *buffer);
 int venus_surface_begin_cpu_read(struct venus_surface *surface);
 int venus_surface_end_cpu_read(struct venus_surface *surface);
+int venus_surface_begin_cpu_write(struct venus_surface *surface);
+int venus_surface_end_cpu_write(struct venus_surface *surface);
+int venus_surface_begin_cpu_rw(struct venus_surface *surface);
+int venus_surface_end_cpu_rw(struct venus_surface *surface);
+int venus_surface_copy_from_nv12(
+    struct venus_surface *surface, const uint8_t *source,
+    size_t source_size, uint32_t source_stride,
+    size_t source_uv_offset, unsigned int width,
+    unsigned int height);
+int venus_surface_copy_to_nv12(
+    struct venus_surface *surface, uint8_t *destination,
+    size_t destination_size, uint32_t destination_stride,
+    size_t destination_uv_offset, unsigned int width,
+    unsigned int height);
 void venus_objects_fill_vtable(struct VADriverVTable *vtable);
 void venus_objects_destroy_all(struct venus_backend *backend);
 void venus_decode_fill_vtable(struct VADriverVTable *vtable);

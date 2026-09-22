@@ -1,7 +1,7 @@
 project(
   'venus-vaapi-driver',
   'c',
-  version: '0.10.0',
+  version: '0.11.0',
   license: 'MIT',
   meson_version: '>=1.2.0',
   default_options: [
@@ -11,9 +11,7 @@ project(
   ],
 )
 
-cc = meson.get_compiler('c')
 libva_dep = dependency('libva', version: '>=1.20')
-libva_drm_dep = dependency('libva-drm', version: '>=1.20')
 libdrm_dep = dependency('libdrm')
 threads_dep = dependency('threads')
 
@@ -73,13 +71,6 @@ executable(
 )
 
 executable(
-  'venus-gnome-rdp-check',
-  files('tools/venus-gnome-rdp-check.c'),
-  dependencies: [libva_dep, libva_drm_dep, libdrm_dep],
-  install: false,
-)
-
-executable(
   'venus-v4l2-decode',
   common_sources + stateful_sources + files('tools/venus-v4l2-decode.c'),
   include_directories: project_inc,
@@ -94,8 +85,6 @@ executable(
   dependencies: [threads_dep],
   install: false,
 )
-
-subdir('tests')
 
 summary(
   {

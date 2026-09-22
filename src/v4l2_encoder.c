@@ -802,16 +802,23 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
         encoder->output_format.plane_fmt[0].bytesperline;
     if (stride == 0)
         stride = encoder->visible_width;
-    scanlines =
-        (encoder->visible_height + 31u) / 32u * 32u;
-    status = venus_v4l2_encoder_pack_nv12(
-        encoder->output[index].data,
-        encoder->output[index].length,
-        stride, scanlines, data,
-        encoder->visible_width,
-        encoder->visible_height, &packed_size);
-    if (status < 0)
-        return status;
+    if (stride == encoder->visible_width) {
+        if (expected_size > encoder->output[index].length)
+            return -ENOSPC;
+        memcpy(encoder->output[index].data, data, expected_size);
+        packed_size = expected_size;
+    } else {
+        scanlines =
+            (encoder->visible_height + 31u) / 32u * 32u;
+        status = venus_v4l2_encoder_pack_nv12(
+            encoder->output[index].data,
+            encoder->output[index].length,
+            stride, scanlines, data,
+            encoder->visible_width,
+            encoder->visible_height, &packed_size);
+        if (status < 0)
+            return status;
+    }
     if (packed_size > UINT32_MAX)
         return -EOVERFLOW;
 

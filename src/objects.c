@@ -154,32 +154,195 @@ static int allocate_dma_surface(struct venus_surface *surface,
     return 0;
 }
 
-int venus_surface_begin_cpu_read(struct venus_surface *surface)
+static int surface_cpu_sync(struct venus_surface *surface,
+                            uint64_t flags)
 {
     struct dma_buf_sync sync = {
-        .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ,
+        .flags = flags,
     };
 
     if (!surface || !surface->dma_backed)
         return 0;
+    if (surface->dma_fd < 0)
+        return -EBADF;
     if (xioctl(surface->dma_fd, DMA_BUF_IOCTL_SYNC,
                &sync) < 0)
         return -errno;
     return 0;
 }
 
+int venus_surface_begin_cpu_read(struct venus_surface *surface)
+{
+    return surface_cpu_sync(
+        surface, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+}
+
 int venus_surface_end_cpu_read(struct venus_surface *surface)
 {
-    struct dma_buf_sync sync = {
-        .flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ,
-    };
+    return surface_cpu_sync(
+        surface, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+}
 
-    if (!surface || !surface->dma_backed)
-        return 0;
-    if (xioctl(surface->dma_fd, DMA_BUF_IOCTL_SYNC,
-               &sync) < 0)
-        return -errno;
-    return 0;
+int venus_surface_begin_cpu_write(struct venus_surface *surface)
+{
+    return surface_cpu_sync(
+        surface, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+}
+
+int venus_surface_end_cpu_write(struct venus_surface *surface)
+{
+    return surface_cpu_sync(
+        surface, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+}
+
+int venus_surface_begin_cpu_rw(struct venus_surface *surface)
+{
+    return surface_cpu_sync(
+        surface, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
+}
+
+int venus_surface_end_cpu_rw(struct venus_surface *surface)
+{
+    return surface_cpu_sync(
+        surface, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
+}
+
+int venus_surface_copy_from_nv12(
+    struct venus_surface *surface, const uint8_t *source,
+    size_t source_size, uint32_t source_stride,
+    size_t source_uv_offset, unsigned int width,
+    unsigned int height)
+{
+    uint32_t destination_stride;
+    size_t destination_uv_offset;
+    size_t source_required;
+    size_t destination_required;
+    unsigned int row;
+    int status;
+    int end_status;
+
+    if (!surface || !source || !surface->data ||
+        width == 0 || height == 0 || (width & 1u) ||
+        (height & 1u) || width > surface->width ||
+        height > surface->height || source_stride < width)
+        return -EINVAL;
+    if (source_stride > SIZE_MAX / height ||
+        source_uv_offset < (size_t)source_stride * height ||
+        source_stride > SIZE_MAX / (height / 2u))
+        return -EOVERFLOW;
+
+    source_required =
+        source_uv_offset + (size_t)source_stride * (height / 2u);
+    destination_stride =
+        surface->stride ? surface->stride : surface->width;
+    destination_uv_offset =
+        surface->uv_offset
+            ? surface->uv_offset
+            : (size_t)destination_stride * surface->height;
+    if (destination_stride < width ||
+        destination_stride > SIZE_MAX / (height / 2u) ||
+        destination_uv_offset >
+            SIZE_MAX - (size_t)destination_stride *
+                           (height / 2u))
+        return -EOVERFLOW;
+
+    destination_required =
+        destination_uv_offset +
+        (size_t)destination_stride * (height / 2u);
+    if (source_required > source_size ||
+        destination_required > surface->capacity)
+        return -ENOSPC;
+
+    status = venus_surface_begin_cpu_write(surface);
+    if (status < 0)
+        return status;
+
+    memset(surface->data, 0, surface->capacity);
+    for (row = 0; row < height; row++)
+        memcpy(surface->data +
+                   (size_t)row * destination_stride,
+               source + (size_t)row * source_stride, width);
+    for (row = 0; row < height / 2u; row++)
+        memcpy(surface->data + destination_uv_offset +
+                   (size_t)row * destination_stride,
+               source + source_uv_offset +
+                   (size_t)row * source_stride,
+               width);
+
+    surface->data_size = destination_required;
+    surface->ready = true;
+    end_status = venus_surface_end_cpu_write(surface);
+    return end_status < 0 ? end_status : 0;
+}
+
+int venus_surface_copy_to_nv12(
+    struct venus_surface *surface, uint8_t *destination,
+    size_t destination_size, uint32_t destination_stride,
+    size_t destination_uv_offset, unsigned int width,
+    unsigned int height)
+{
+    uint32_t source_stride;
+    size_t source_uv_offset;
+    size_t source_required;
+    size_t destination_required;
+    unsigned int row;
+    int status;
+    int end_status;
+
+    if (!surface || !destination || !surface->data ||
+        width == 0 || height == 0 || (width & 1u) ||
+        (height & 1u) || width > surface->width ||
+        height > surface->height || destination_stride < width)
+        return -EINVAL;
+
+    source_stride =
+        surface->stride ? surface->stride : surface->width;
+    source_uv_offset =
+        surface->uv_offset
+            ? surface->uv_offset
+            : (size_t)source_stride * surface->height;
+    if (source_stride < width ||
+        source_stride > SIZE_MAX / (height / 2u) ||
+        source_uv_offset >
+            SIZE_MAX - (size_t)source_stride *
+                           (height / 2u) ||
+        destination_stride > SIZE_MAX / height ||
+        destination_uv_offset <
+            (size_t)destination_stride * height ||
+        destination_stride > SIZE_MAX / (height / 2u) ||
+        destination_uv_offset >
+            SIZE_MAX - (size_t)destination_stride *
+                           (height / 2u))
+        return -EOVERFLOW;
+
+    source_required =
+        source_uv_offset + (size_t)source_stride * (height / 2u);
+    destination_required =
+        destination_uv_offset +
+        (size_t)destination_stride * (height / 2u);
+    if (source_required > surface->data_size ||
+        destination_required > destination_size)
+        return -ENOSPC;
+
+    status = venus_surface_begin_cpu_read(surface);
+    if (status < 0)
+        return status;
+
+    memset(destination, 0, destination_size);
+    for (row = 0; row < height; row++)
+        memcpy(destination +
+                   (size_t)row * destination_stride,
+               surface->data + (size_t)row * source_stride,
+               width);
+    for (row = 0; row < height / 2u; row++)
+        memcpy(destination + destination_uv_offset +
+                   (size_t)row * destination_stride,
+               surface->data + source_uv_offset +
+                   (size_t)row * source_stride,
+               width);
+
+    end_status = venus_surface_end_cpu_read(surface);
+    return end_status < 0 ? end_status : 0;
 }
 
 static struct venus_buffer *allocate_buffer(
@@ -414,6 +577,20 @@ static VAStatus backend_create_surfaces2(
     return status;
 }
 
+static bool surface_has_image(struct venus_backend *backend,
+                              VASurfaceID surface_id)
+{
+    unsigned int index;
+
+    for (index = 0; index < VENUS_MAX_IMAGES; index++) {
+        if (backend->images[index].used &&
+            backend->images[index].surface_id == surface_id)
+            return true;
+    }
+
+    return false;
+}
+
 static VAStatus backend_destroy_surfaces(
     VADriverContextP context, VASurfaceID *surface_ids,
     int num_surfaces)
@@ -428,10 +605,18 @@ static VAStatus backend_destroy_surfaces(
 
     pthread_mutex_lock(&backend->mutex);
     for (index = 0; index < num_surfaces; index++) {
-        if (!venus_backend_find_surface(
-                backend, surface_ids[index])) {
+        struct venus_surface *surface =
+            venus_backend_find_surface(backend, surface_ids[index]);
+
+        if (!surface) {
             pthread_mutex_unlock(&backend->mutex);
             return VA_STATUS_ERROR_INVALID_SURFACE;
+        }
+        if (surface->encode_pending ||
+            surface->context_id != VA_INVALID_ID ||
+            surface_has_image(backend, surface->id)) {
+            pthread_mutex_unlock(&backend->mutex);
+            return VA_STATUS_ERROR_SURFACE_BUSY;
         }
     }
 
@@ -530,24 +715,54 @@ static VAStatus backend_set_num_elements(
     return VA_STATUS_SUCCESS;
 }
 
+static struct venus_surface *surface_for_image_buffer(
+    struct venus_backend *backend, VABufferID buffer_id)
+{
+    unsigned int index;
+
+    for (index = 0; index < VENUS_MAX_IMAGES; index++) {
+        struct venus_image *image = &backend->images[index];
+
+        if (!image->used || image->buffer_id != buffer_id ||
+            image->surface_id == VA_INVALID_ID)
+            continue;
+        return venus_backend_find_surface(
+            backend, image->surface_id);
+    }
+
+    return NULL;
+}
+
 static VAStatus backend_map_buffer(VADriverContextP context,
                                    VABufferID buffer_id,
                                    void **mapped)
 {
     struct venus_backend *backend =
         venus_backend_from_context(context);
+    struct venus_surface *surface;
     struct venus_buffer *buffer;
+    int status;
 
     if (!backend || !mapped)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
     pthread_mutex_lock(&backend->mutex);
     buffer = venus_backend_find_buffer(backend, buffer_id);
-    if (!buffer) {
+    if (!buffer || buffer->map_count == UINT_MAX) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_BUFFER;
     }
 
+    surface = surface_for_image_buffer(backend, buffer_id);
+    if (surface && buffer->map_count == 0) {
+        status = venus_surface_begin_cpu_rw(surface);
+        if (status < 0) {
+            pthread_mutex_unlock(&backend->mutex);
+            return venus_backend_status_from_errno(status);
+        }
+    }
+
+    buffer->map_count++;
     *mapped = buffer->type == VAEncCodedBufferType
                   ? (void *)&buffer->coded_segment
                   : (void *)buffer->data;
@@ -560,17 +775,31 @@ static VAStatus backend_unmap_buffer(VADriverContextP context,
 {
     struct venus_backend *backend =
         venus_backend_from_context(context);
-    VAStatus status;
+    struct venus_surface *surface;
+    struct venus_buffer *buffer;
+    VAStatus result = VA_STATUS_SUCCESS;
+    int status;
 
     if (!backend)
         return VA_STATUS_ERROR_INVALID_CONTEXT;
 
     pthread_mutex_lock(&backend->mutex);
-    status = venus_backend_find_buffer(backend, buffer_id)
-                 ? VA_STATUS_SUCCESS
-                 : VA_STATUS_ERROR_INVALID_BUFFER;
+    buffer = venus_backend_find_buffer(backend, buffer_id);
+    if (!buffer || buffer->map_count == 0) {
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_INVALID_BUFFER;
+    }
+
+    surface = surface_for_image_buffer(backend, buffer_id);
+    buffer->map_count--;
+    if (surface && buffer->map_count == 0) {
+        status = venus_surface_end_cpu_rw(surface);
+        if (status < 0)
+            result = venus_backend_status_from_errno(status);
+    }
+
     pthread_mutex_unlock(&backend->mutex);
-    return status;
+    return result;
 }
 
 static bool buffer_used_by_image(struct venus_backend *backend,
@@ -599,7 +828,8 @@ static VAStatus backend_destroy_buffer(VADriverContextP context,
 
     pthread_mutex_lock(&backend->mutex);
     buffer = venus_backend_find_buffer(backend, buffer_id);
-    if (!buffer || buffer_used_by_image(backend, buffer_id)) {
+    if (!buffer || buffer->map_count > 0 ||
+        buffer_used_by_image(backend, buffer_id)) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_BUFFER;
     }
@@ -815,6 +1045,10 @@ static VAStatus backend_destroy_image(VADriverContextP context,
     }
 
     buffer = venus_backend_find_buffer(backend, image->buffer_id);
+    if (!buffer || buffer->map_count > 0) {
+        pthread_mutex_unlock(&backend->mutex);
+        return VA_STATUS_ERROR_SURFACE_BUSY;
+    }
     venus_backend_free_buffer(buffer);
     memset(image, 0, sizeof(*image));
     pthread_mutex_unlock(&backend->mutex);
@@ -831,7 +1065,8 @@ static VAStatus backend_get_image(
     struct venus_surface *surface;
     struct venus_image *image;
     struct venus_buffer *buffer;
-    size_t copy_size;
+    size_t buffer_size;
+    int status;
 
     if (!backend)
         return VA_STATUS_ERROR_INVALID_CONTEXT;
@@ -853,16 +1088,23 @@ static VAStatus backend_get_image(
     }
     if (x != 0 || y != 0 || width != surface->width ||
         height != surface->height ||
-        nv12_size(width, height, &copy_size) < 0 ||
-        copy_size > surface->data_size ||
-        copy_size > buffer->element_size * buffer->num_elements) {
+        image->width != width || image->height != height ||
+        buffer->map_count > 0 ||
+        buffer->element_size >
+            SIZE_MAX / buffer->num_elements) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    memcpy(buffer->data, surface->data, copy_size);
+    buffer_size =
+        buffer->element_size * buffer->num_elements;
+    status = venus_surface_copy_to_nv12(
+        surface, buffer->data, buffer_size,
+        image->stride, image->uv_offset, width, height);
     pthread_mutex_unlock(&backend->mutex);
-    return VA_STATUS_SUCCESS;
+    return status < 0
+               ? venus_backend_status_from_errno(status)
+               : VA_STATUS_SUCCESS;
 }
 
 static VAStatus backend_put_image(
@@ -877,7 +1119,8 @@ static VAStatus backend_put_image(
     struct venus_surface *surface;
     struct venus_image *image;
     struct venus_buffer *buffer;
-    size_t copy_size;
+    size_t buffer_size;
+    int status;
 
     if (!backend)
         return VA_STATUS_ERROR_INVALID_CONTEXT;
@@ -902,18 +1145,25 @@ static VAStatus backend_put_image(
         src_height != surface->height ||
         dst_width != surface->width ||
         dst_height != surface->height ||
-        nv12_size(surface->width, surface->height, &copy_size) < 0 ||
-        copy_size > buffer->element_size * buffer->num_elements ||
-        copy_size > surface->capacity) {
+        image->width != src_width ||
+        image->height != src_height ||
+        buffer->map_count > 0 ||
+        buffer->element_size >
+            SIZE_MAX / buffer->num_elements) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    memcpy(surface->data, buffer->data, copy_size);
-    surface->data_size = copy_size;
-    surface->ready = true;
+    buffer_size =
+        buffer->element_size * buffer->num_elements;
+    status = venus_surface_copy_from_nv12(
+        surface, buffer->data, buffer_size,
+        image->stride, image->uv_offset,
+        src_width, src_height);
     pthread_mutex_unlock(&backend->mutex);
-    return VA_STATUS_SUCCESS;
+    return status < 0
+               ? venus_backend_status_from_errno(status)
+               : VA_STATUS_SUCCESS;
 }
 
 static VAStatus backend_export_surface_handle(

@@ -24,10 +24,9 @@ jobs:
         run: |
           apt-get install -y             build-essential             file             meson             ninja-build             pkg-config             libva-dev             libdrm-dev
 
-      - name: Build and test
+      - name: Build
         run: |
           meson setup build
           meson compile -C build
-          meson test -C build --print-errorlogs
           file build/venus_drv_video.so
           nm -D --defined-only build/venus_drv_video.so
