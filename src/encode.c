@@ -970,8 +970,9 @@ VAStatus venus_encode_end_picture_locked(
             return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    if (context->encode_sequence > 0 &&
-        parameters.picture->pic_fields.bits.idr_pic_flag) {
+    if (environment_flag_enabled("VENUS_VAAPI_INTRA_ONLY") ||
+        (context->encode_sequence > 0 &&
+         parameters.picture->pic_fields.bits.idr_pic_flag)) {
         status = venus_v4l2_encoder_force_keyframe(context->encoder);
         if (status < 0) {
             venus_backend_log(
