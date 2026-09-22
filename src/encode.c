@@ -2,6 +2,7 @@
 #include "backend_internal.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
@@ -10,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <va/va_enc_h264.h>
 
 #define VENUS_ENCODE_OUTPUT_BUFFERS 4u
@@ -45,6 +47,46 @@ static size_t buffer_bytes(const struct venus_buffer *buffer)
                        SIZE_MAX / buffer->num_elements)
         return 0;
     return buffer->element_size * buffer->num_elements;
+}
+
+static bool environment_flag_enabled(const char *name)
+{
+    const char *value = getenv(name);
+
+    return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static void dump_encoded_packet(
+    const struct venus_v4l2_packet *packet)
+{
+    const char *path = getenv("VENUS_VAAPI_DUMP_H264");
+    size_t offset = 0;
+    int fd;
+
+    if (!path || !path[0] || !packet || !packet->data ||
+        packet->size == 0)
+        return;
+
+    fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+              0600);
+    if (fd < 0)
+        return;
+
+    while (offset < packet->size) {
+        ssize_t written =
+            write(fd, packet->data + offset,
+                  packet->size - offset);
+
+        if (written < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (written == 0)
+            break;
+        offset += (size_t)written;
+    }
+    close(fd);
 }
 
 static int parse_frame_rate(uint32_t value, uint32_t *result)
@@ -528,6 +570,7 @@ int venus_encode_store_packet_locked(
         return -EINVAL;
 
     backend = context->backend;
+    dump_encoded_packet(packet);
     buffer = NULL;
     buffer_id = VA_INVALID_ID;
     for (offset = 0; offset < context->encode_queue_count;
@@ -735,6 +778,8 @@ static int open_encoder(
         gop_size = parameters->sequence->intra_period;
     if (gop_size == 0)
         gop_size = VENUS_ENCODE_DEFAULT_GOP;
+    if (environment_flag_enabled("VENUS_VAAPI_INTRA_ONLY"))
+        gop_size = 1;
 
     /*
      * IRIS1 rejects H.264 sessions with frame rate control disabled.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-for command in meson ninja pkg-config cc; do
+for command in meson ninja pkg-config cc udevadm; do
     command -v "${command}" >/dev/null 2>&1 || {
         echo "缺少命令: ${command}" >&2
         exit 1
@@ -31,6 +31,15 @@ fi
 
 meson compile -C "${BUILD}"
 "${SUDO[@]}" meson install -C "${BUILD}"
+
+UDEV_RULE="${ROOT}/data/70-venus-vaapi-dma-heap.rules"
+"${SUDO[@]}" install -D -m 0644 "${UDEV_RULE}" \
+    /etc/udev/rules.d/70-venus-vaapi-dma-heap.rules
+"${SUDO[@]}" udevadm control --reload-rules
+"${SUDO[@]}" udevadm trigger --subsystem-match=dma_heap --action=change || true
+if [[ -e /dev/dma_heap/system ]]; then
+    "${SUDO[@]}" chmod 0666 /dev/dma_heap/system
+fi
 
 MULTIARCH="$(cc -print-multiarch 2>/dev/null || true)"
 DRIVER=""
