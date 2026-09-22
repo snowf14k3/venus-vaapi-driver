@@ -661,7 +661,8 @@ static int store_packet(const struct venus_v4l2_packet *packet,
 static int open_encoder(
     struct venus_backend *backend, struct venus_context *context,
     const struct venus_config *config,
-    const struct venus_h264_encode_parameters *parameters)
+    const struct venus_h264_encode_parameters *parameters,
+    bool output_dmabuf)
 {
     struct venus_v4l2_encoder_config encoder_config;
     struct venus_v4l2_error error;
@@ -817,6 +818,7 @@ static int open_encoder(
             parameters->picture->
                 pic_fields.bits.transform_8x8_mode_flag,
         .h264_aud = parameters->has_aud,
+        .output_dmabuf = output_dmabuf,
         .capture_buffer_size = v4l2_capture_size,
         .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
         .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
@@ -832,16 +834,18 @@ static int open_encoder(
             -status);
         return status;
     }
+    context->encode_dmabuf = output_dmabuf;
 
     venus_backend_log(
         backend,
-        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u(auto) size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d range=%u..%u gop=%u aud=%u output=%u capture=%u",
+        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u(auto) size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d range=%u..%u gop=%u aud=%u input=%s output=%u capture=%u",
         context->id, config->profile,
         parameters->sequence->level_idc, level,
         context->encode_width, context->encode_height,
         frames_per_second, config->rate_control,
         bitrate, qp, minimum_qp, maximum_qp, gop_size,
         parameters->has_aud ? 1u : 0u,
+        output_dmabuf ? "dmabuf" : "mmap",
         venus_v4l2_encoder_output_count(context->encoder),
         venus_v4l2_encoder_capture_count(context->encoder));
     return 0;
@@ -954,7 +958,8 @@ VAStatus venus_encode_end_picture_locked(
 
     if (!context->encoder) {
         status = open_encoder(
-            backend, context, config, &parameters);
+            backend, context, config, &parameters,
+            surface->dma_backed);
         if (status < 0)
             return venus_backend_encode_status_from_errno(status);
     } else if (parameters.sequence) {
@@ -984,17 +989,29 @@ VAStatus venus_encode_end_picture_locked(
         }
     }
 
-    status = venus_surface_begin_cpu_read(surface);
-    if (status < 0)
-        return venus_backend_encode_status_from_errno(status);
+    frame_data = NULL;
+    allocated_frame = NULL;
+    expected_frame_size = 0;
+    if (context->encode_dmabuf) {
+        if (!surface->dma_backed || surface->dma_fd < 0)
+            return VA_STATUS_ERROR_INVALID_SURFACE;
+        status = venus_surface_wait_for_device_read(surface);
+        if (status < 0)
+            return venus_backend_encode_status_from_errno(status);
+        expected_frame_size = surface->capacity;
+    } else {
+        status = venus_surface_begin_cpu_read(surface);
+        if (status < 0)
+            return venus_backend_encode_status_from_errno(status);
 
-    status = prepare_surface_frame(
-        surface, context->encode_width,
-        context->encode_height, &frame_data,
-        &allocated_frame, &expected_frame_size);
-    if (status < 0) {
-        venus_surface_end_cpu_read(surface);
-        return venus_backend_encode_status_from_errno(status);
+        status = prepare_surface_frame(
+            surface, context->encode_width,
+            context->encode_height, &frame_data,
+            &allocated_frame, &expected_frame_size);
+        if (status < 0) {
+            venus_surface_end_cpu_read(surface);
+            return venus_backend_encode_status_from_errno(status);
+        }
     }
 
     context->encode_sequence++;
@@ -1004,6 +1021,7 @@ VAStatus venus_encode_end_picture_locked(
 
     coded->coded_size = 0;
     coded->coded_ready = false;
+    coded->coded_delivered = false;
     coded->coded_packets = 0;
     coded->coded_tag = 0;
     coded->source_surface_id = surface->id;
@@ -1015,19 +1033,28 @@ VAStatus venus_encode_end_picture_locked(
         context, coded->id, frame_tag);
     if (status < 0) {
         free(allocated_frame);
-        venus_surface_end_cpu_read(surface);
+        if (!context->encode_dmabuf)
+            venus_surface_end_cpu_read(surface);
         return venus_backend_encode_status_from_errno(status);
     }
 
     surface->encode_pending = true;
     surface->coded_buffer_id = coded->id;
 
-    status = venus_v4l2_encoder_submit(
-        context->encoder, frame_data,
-        expected_frame_size, frame_tag,
-        store_packet, context);
+    if (context->encode_dmabuf) {
+        status = venus_v4l2_encoder_submit_dmabuf(
+            context->encoder, surface->dma_fd,
+            surface->capacity, surface->stride,
+            surface->scanlines, surface->uv_offset,
+            frame_tag, store_packet, context);
+    } else {
+        status = venus_v4l2_encoder_submit(
+            context->encoder, frame_data,
+            expected_frame_size, frame_tag,
+            store_packet, context);
+    }
     free(allocated_frame);
-    {
+    if (!context->encode_dmabuf) {
         int sync_status =
             venus_surface_end_cpu_read(surface);
 
@@ -1137,6 +1164,7 @@ void venus_encode_close_context(struct venus_context *context)
 
     venus_v4l2_encoder_close(context->encoder);
     context->encoder = NULL;
+    context->encode_dmabuf = false;
     context->encode_queue_head = 0;
     context->encode_queue_count = 0;
 }

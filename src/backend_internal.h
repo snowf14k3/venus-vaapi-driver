@@ -77,6 +77,7 @@ struct venus_buffer {
     bool owns_data;
     unsigned int map_count;
     bool coded_ready;
+    bool coded_delivered;
     size_t coded_size;
     unsigned int coded_packets;
     uint64_t coded_tag;
@@ -106,6 +107,7 @@ struct venus_context {
     struct venus_backend *backend;
     struct venus_v4l2_decoder *decoder;
     struct venus_v4l2_encoder *encoder;
+    bool encode_dmabuf;
     bool in_picture;
     VASurfaceID target;
     VABufferID pending[VENUS_MAX_PENDING_BUFFERS];
@@ -159,6 +161,8 @@ int venus_surface_begin_cpu_write(struct venus_surface *surface);
 int venus_surface_end_cpu_write(struct venus_surface *surface);
 int venus_surface_begin_cpu_rw(struct venus_surface *surface);
 int venus_surface_end_cpu_rw(struct venus_surface *surface);
+int venus_surface_wait_for_device_read(
+    const struct venus_surface *surface);
 int venus_surface_copy_from_nv12(
     struct venus_surface *surface, const uint8_t *source,
     size_t source_size, uint32_t source_stride,

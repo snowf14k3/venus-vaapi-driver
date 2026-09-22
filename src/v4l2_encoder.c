@@ -17,6 +17,7 @@
 struct mapped_buffer {
     void *data;
     size_t length;
+    int dma_fd;
     bool queued;
 };
 
@@ -30,6 +31,7 @@ struct venus_v4l2_encoder {
     struct v4l2_pix_format_mplane capture_format;
     uint32_t visible_width;
     uint32_t visible_height;
+    enum v4l2_memory output_memory;
     bool output_streaming;
     bool capture_streaming;
     bool stop_sent;
@@ -197,7 +199,7 @@ static int set_parameters(
 
     status = set_control(
         encoder, V4L2_CID_MPEG_VIDEO_HEADER_MODE,
-        V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE,
+        V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
         "S_CTRL(HEADER_MODE)");
     if (status < 0)
         return status;
@@ -294,6 +296,7 @@ static int set_parameters(
 
 static int request_and_map(struct venus_v4l2_encoder *encoder,
                            enum v4l2_buf_type type,
+                           enum v4l2_memory memory,
                            unsigned int requested,
                            struct mapped_buffer **mapped,
                            unsigned int *mapped_count)
@@ -301,7 +304,7 @@ static int request_and_map(struct venus_v4l2_encoder *encoder,
     struct v4l2_requestbuffers request = {
         .count = requested,
         .type = type,
-        .memory = V4L2_MEMORY_MMAP,
+        .memory = memory,
     };
     struct mapped_buffer *buffers;
     unsigned int index;
@@ -318,12 +321,31 @@ static int request_and_map(struct venus_v4l2_encoder *encoder,
     if (!buffers)
         return -ENOMEM;
 
+    for (index = 0; index < request.count; index++)
+        buffers[index].dma_fd = -1;
+
+    if (memory == V4L2_MEMORY_DMABUF) {
+        size_t length =
+            encoder->output_format.plane_fmt[0].sizeimage;
+
+        if (type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ||
+            length == 0) {
+            free(buffers);
+            return -EINVAL;
+        }
+        for (index = 0; index < request.count; index++)
+            buffers[index].length = length;
+        *mapped = buffers;
+        *mapped_count = request.count;
+        return 0;
+    }
+
     for (index = 0; index < request.count; index++) {
         struct v4l2_plane planes[VIDEO_MAX_PLANES] = { 0 };
         struct v4l2_buffer buffer = {
             .index = index,
             .type = type,
-            .memory = V4L2_MEMORY_MMAP,
+            .memory = memory,
             .length = 1,
             .m.planes = planes,
         };
@@ -375,13 +397,14 @@ fail:
 
 static void release_buffers(struct venus_v4l2_encoder *encoder,
                             enum v4l2_buf_type type,
+                            enum v4l2_memory memory,
                             struct mapped_buffer **mapped,
                             unsigned int *mapped_count)
 {
     struct v4l2_requestbuffers request = {
         .count = 0,
         .type = type,
-        .memory = V4L2_MEMORY_MMAP,
+        .memory = memory,
     };
     unsigned int index;
 
@@ -390,6 +413,8 @@ static void release_buffers(struct venus_v4l2_encoder *encoder,
             if ((*mapped)[index].data)
                 munmap((*mapped)[index].data,
                        (*mapped)[index].length);
+            if ((*mapped)[index].dma_fd >= 0)
+                close((*mapped)[index].dma_fd);
         }
         free(*mapped);
         *mapped = NULL;
@@ -500,6 +525,9 @@ int venus_v4l2_encoder_open(
     encoder->fd = -1;
     encoder->visible_width = config->width;
     encoder->visible_height = config->height;
+    encoder->output_memory = config->output_dmabuf
+                                 ? V4L2_MEMORY_DMABUF
+                                 : V4L2_MEMORY_MMAP;
 
     encoder->fd =
         open(config->device, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -522,13 +550,15 @@ int venus_v4l2_encoder_open(
         goto fail;
     status = request_and_map(
         encoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-        config->output_buffers, &encoder->output,
+        encoder->output_memory, config->output_buffers,
+        &encoder->output,
         &encoder->output_count);
     if (status < 0)
         goto fail;
     status = request_and_map(
         encoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-        config->capture_buffers, &encoder->capture,
+        V4L2_MEMORY_MMAP, config->capture_buffers,
+        &encoder->capture,
         &encoder->capture_count);
     if (status < 0)
         goto fail;
@@ -564,7 +594,7 @@ static int dequeue_output(struct venus_v4l2_encoder *encoder,
         struct v4l2_plane planes[VIDEO_MAX_PLANES] = { 0 };
         struct v4l2_buffer buffer = {
             .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-            .memory = V4L2_MEMORY_MMAP,
+            .memory = encoder->output_memory,
             .length = 1,
             .m.planes = planes,
         };
@@ -578,6 +608,10 @@ static int dequeue_output(struct venus_v4l2_encoder *encoder,
             return -EIO;
 
         encoder->output[buffer.index].queued = false;
+        if (encoder->output[buffer.index].dma_fd >= 0) {
+            close(encoder->output[buffer.index].dma_fd);
+            encoder->output[buffer.index].dma_fd = -1;
+        }
         *made_progress = true;
     }
 }
@@ -777,7 +811,8 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
     int index;
     int status;
 
-    if (!encoder || !data || size == 0 ||
+    if (!encoder || encoder->output_memory != V4L2_MEMORY_MMAP ||
+        !data || size == 0 ||
         encoder->visible_width == 0 ||
         encoder->visible_height == 0 ||
         encoder->visible_width >
@@ -865,6 +900,87 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
     return 0;
 }
 
+int venus_v4l2_encoder_submit_dmabuf(
+    struct venus_v4l2_encoder *encoder, int dma_fd,
+    size_t dma_size, uint32_t stride, uint32_t scanlines,
+    size_t uv_offset, uint64_t tag,
+    venus_v4l2_packet_callback callback, void *opaque)
+{
+    struct v4l2_plane planes[VIDEO_MAX_PLANES] = { 0 };
+    struct v4l2_buffer buffer = {
+        .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+        .memory = V4L2_MEMORY_DMABUF,
+        .length = 1,
+        .m.planes = planes,
+    };
+    uint32_t expected_stride;
+    uint32_t required_size;
+    int imported_fd;
+    int index;
+    int status;
+
+    if (!encoder || encoder->output_memory != V4L2_MEMORY_DMABUF ||
+        dma_fd < 0 || dma_size == 0 || dma_size > UINT32_MAX ||
+        stride == 0 || scanlines < encoder->visible_height ||
+        uv_offset != (size_t)stride * scanlines)
+        return -EINVAL;
+
+    expected_stride =
+        encoder->output_format.plane_fmt[0].bytesperline;
+    if (expected_stride == 0)
+        expected_stride = encoder->visible_width;
+    required_size =
+        encoder->output_format.plane_fmt[0].sizeimage;
+    if (stride != expected_stride || required_size == 0 ||
+        dma_size < required_size)
+        return -EINVAL;
+
+    index = find_free_output(encoder, callback, opaque);
+    if (index < 0)
+        return index;
+
+    imported_fd = fcntl(dma_fd, F_DUPFD_CLOEXEC, 0);
+    if (imported_fd < 0)
+        return -errno;
+
+    buffer.index = (unsigned int)index;
+    buffer.field = encoder->output_format.field;
+    buffer.timestamp.tv_sec = (long)(tag / 1000000u);
+    buffer.timestamp.tv_usec = (long)(tag % 1000000u);
+    planes[0].m.fd = imported_fd;
+    planes[0].bytesused = required_size;
+    planes[0].data_offset = 0;
+    planes[0].length = (uint32_t)dma_size;
+
+    if (xioctl(encoder->fd, VIDIOC_QBUF, &buffer) < 0) {
+        int saved_errno = errno;
+
+        close(imported_fd);
+        snprintf(encoder->last_operation,
+                 sizeof(encoder->last_operation),
+                 "VIDIOC_QBUF(OUTPUT DMABUF)");
+        return -saved_errno;
+    }
+
+    encoder->output[index].dma_fd = imported_fd;
+    encoder->output[index].queued = true;
+
+    if (!encoder->output_streaming) {
+        status = stream_on(
+            encoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+        if (status < 0)
+            return status;
+    }
+    if (!encoder->capture_streaming) {
+        status = stream_on(
+            encoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+        if (status < 0)
+            return status;
+    }
+
+    return 0;
+}
+
 int venus_v4l2_encoder_force_keyframe(
     struct venus_v4l2_encoder *encoder)
 {
@@ -907,10 +1023,12 @@ void venus_v4l2_encoder_close(struct venus_v4l2_encoder *encoder)
 
     release_buffers(
         encoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-        &encoder->capture, &encoder->capture_count);
+        V4L2_MEMORY_MMAP, &encoder->capture,
+        &encoder->capture_count);
     release_buffers(
         encoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-        &encoder->output, &encoder->output_count);
+        encoder->output_memory, &encoder->output,
+        &encoder->output_count);
 
     if (encoder->fd >= 0)
         close(encoder->fd);

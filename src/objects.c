@@ -108,6 +108,14 @@ static int allocate_dma_surface(struct venus_surface *surface,
         return -EOVERFLOW;
     allocation_size =
         uv_offset + stride * chroma_scanlines;
+    /*
+     * Venus may round OUTPUT sizeimage above the visible NV12 layout.
+     * Keep one firmware page of tail room so the same DMA-BUF can be
+     * imported directly instead of copied through an MMAP staging buffer.
+     */
+    if (allocation_size > SIZE_MAX - 65536u)
+        return -EOVERFLOW;
+    allocation_size += 65536u;
     if (align_size(allocation_size, 4096,
                    &allocation_size) < 0 ||
         allocation_size > UINT32_MAX)
@@ -187,6 +195,12 @@ static int wait_surface_access(const struct venus_surface *surface,
     }
 
     return -ETIMEDOUT;
+}
+
+int venus_surface_wait_for_device_read(
+    const struct venus_surface *surface)
+{
+    return wait_surface_access(surface, POLLIN);
 }
 
 static int surface_cpu_sync(struct venus_surface *surface,
@@ -538,13 +552,11 @@ static VAStatus create_surfaces_locked(
             continue;
 
         surface->dma_fd = -1;
-        if (exportable) {
-            if (allocate_dma_surface(
-                    surface, width, height) < 0) {
+        if (allocate_dma_surface(surface, width, height) < 0) {
+            if (exportable) {
                 release_surface(surface);
                 goto fail;
             }
-        } else {
             surface->data = calloc(1, capacity);
             if (!surface->data) {
                 release_surface(surface);
@@ -795,8 +807,10 @@ static VAStatus wait_coded_delivery_locked(
         backend, buffer->context_id);
     if (!context || buffer->coded_tag == 0)
         return VA_STATUS_ERROR_INVALID_CONTEXT;
+    if (buffer->coded_delivered)
+        return VA_STATUS_SUCCESS;
 
-    while (buffer->map_count == 0 &&
+    while (!buffer->coded_delivered &&
            buffer->coded_tag !=
                context->encode_delivery_sequence) {
         VABufferID buffer_id = buffer->id;
@@ -820,7 +834,7 @@ static VAStatus wait_coded_delivery_locked(
             return VA_STATUS_ERROR_INVALID_BUFFER;
     }
 
-    if (buffer->map_count == 0) {
+    if (!buffer->coded_delivered) {
         venus_backend_log(
             backend,
             "deliver-coded buffer=0x%x tag=%llu expected=%llu bytes=%zu",
@@ -830,6 +844,7 @@ static VAStatus wait_coded_delivery_locked(
                 context->encode_delivery_sequence,
             buffer->coded_size);
         context->encode_delivery_sequence++;
+        buffer->coded_delivered = true;
     }
 
     *buffer_ptr = buffer;

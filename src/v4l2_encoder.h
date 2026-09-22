@@ -29,6 +29,7 @@ struct venus_v4l2_encoder_config {
     uint32_t h264_entropy_mode;
     uint32_t h264_transform_8x8;
     bool h264_aud;
+    bool output_dmabuf;
     size_t capture_buffer_size;
     unsigned int output_buffers;
     unsigned int capture_buffers;
@@ -53,6 +54,11 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
                               uint64_t tag,
                               venus_v4l2_packet_callback callback,
                               void *opaque);
+int venus_v4l2_encoder_submit_dmabuf(
+    struct venus_v4l2_encoder *encoder, int dma_fd,
+    size_t dma_size, uint32_t stride, uint32_t scanlines,
+    size_t uv_offset, uint64_t tag,
+    venus_v4l2_packet_callback callback, void *opaque);
 int venus_v4l2_encoder_pack_nv12(
     uint8_t *destination, size_t destination_size,
     uint32_t destination_stride, uint32_t destination_scanlines,
