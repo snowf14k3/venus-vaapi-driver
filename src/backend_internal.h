@@ -59,6 +59,7 @@ struct venus_surface {
     size_t uv_offset;
     int dma_fd;
     bool dma_backed;
+    bool gpu_native;
     bool ready;
     bool encode_pending;
     VABufferID coded_buffer_id;

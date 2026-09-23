@@ -5,7 +5,6 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/dma-buf.h>
-#include <linux/dma-heap.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +13,9 @@
 #include <unistd.h>
 #include <va/va_drmcommon.h>
 #include <drm_fourcc.h>
+#include <xf86drm.h>
+#include <drm.h>
+#include <drm/msm_drm.h>
 
 static int nv12_size(unsigned int width, unsigned int height,
                      size_t *size)
@@ -60,6 +62,44 @@ static int align_size(size_t value, size_t alignment,
     return 0;
 }
 
+static int allocate_msm_dmabuf(size_t size, int *dma_fd)
+{
+    struct drm_msm_gem_new request = {
+        .size = size,
+        .flags = MSM_BO_WC,
+    };
+    struct drm_gem_close close_request = { 0 };
+    int drm_fd;
+    int exported_fd = -1;
+    int saved_errno;
+
+    drm_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    if (drm_fd < 0)
+        return -errno;
+    if (xioctl(drm_fd, DRM_IOCTL_MSM_GEM_NEW,
+               &request) < 0) {
+        saved_errno = errno;
+        close(drm_fd);
+        return -saved_errno;
+    }
+
+    close_request.handle = request.handle;
+    if (drmPrimeHandleToFD(
+            drm_fd, request.handle,
+            DRM_CLOEXEC | DRM_RDWR, &exported_fd) < 0) {
+        saved_errno = errno;
+        xioctl(drm_fd, DRM_IOCTL_GEM_CLOSE,
+               &close_request);
+        close(drm_fd);
+        return -saved_errno;
+    }
+
+    xioctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &close_request);
+    close(drm_fd);
+    *dma_fd = exported_fd;
+    return 0;
+}
+
 static void release_surface(struct venus_surface *surface)
 {
     if (!surface)
@@ -80,12 +120,6 @@ static int allocate_dma_surface(struct venus_surface *surface,
                                 unsigned int width,
                                 unsigned int height)
 {
-    static const char *const heap_paths[] = {
-        "/dev/dma_heap/system",
-        "/dev/dma_heap/linux,cma",
-        "/dev/dma_heap/default_cma_region",
-    };
-    struct dma_heap_allocation_data allocation = { 0 };
     struct dma_buf_sync sync = {
         .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE,
     };
@@ -94,9 +128,9 @@ static int allocate_dma_surface(struct venus_surface *surface,
     size_t chroma_scanlines;
     size_t uv_offset;
     size_t allocation_size;
-    unsigned int index;
-    int heap_fd = -1;
+    int dma_fd = -1;
     int saved_errno;
+    int status;
 
     if (align_size(width, 128, &stride) < 0 ||
         align_size(height, 32, &scanlines) < 0 ||
@@ -113,8 +147,7 @@ static int allocate_dma_surface(struct venus_surface *surface,
         uv_offset + stride * chroma_scanlines;
     /*
      * Venus may round OUTPUT sizeimage above the visible NV12 layout.
-     * Keep one firmware page of tail room so the same DMA-BUF can be
-     * imported directly instead of copied through an MMAP staging buffer.
+     * Keep one firmware page of tail room for direct DMA-BUF import.
      */
     if (allocation_size > SIZE_MAX - 65536u)
         return -EOVERFLOW;
@@ -124,57 +157,40 @@ static int allocate_dma_surface(struct venus_surface *surface,
         allocation_size > UINT32_MAX)
         return -EOVERFLOW;
 
-    for (index = 0;
-         index < sizeof(heap_paths) / sizeof(heap_paths[0]);
-         index++) {
-        heap_fd = open(heap_paths[index],
-                       O_RDWR | O_CLOEXEC);
-        if (heap_fd >= 0)
-            break;
-    }
-    if (heap_fd < 0)
-        return -errno;
-
-    allocation.len = allocation_size;
-    allocation.fd_flags = O_RDWR | O_CLOEXEC;
-    if (xioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC,
-               &allocation) < 0) {
-        saved_errno = errno;
-        close(heap_fd);
-        return -saved_errno;
-    }
-    close(heap_fd);
+    status = allocate_msm_dmabuf(allocation_size, &dma_fd);
+    if (status < 0)
+        return status;
 
     surface->data =
         mmap(NULL, allocation_size, PROT_READ | PROT_WRITE,
-             MAP_SHARED, (int)allocation.fd, 0);
+             MAP_SHARED, dma_fd, 0);
     if (surface->data == MAP_FAILED) {
         saved_errno = errno;
         surface->data = NULL;
-        close((int)allocation.fd);
+        close(dma_fd);
         return -saved_errno;
     }
 
-    if (xioctl((int)allocation.fd, DMA_BUF_IOCTL_SYNC,
-               &sync) < 0) {
+    if (xioctl(dma_fd, DMA_BUF_IOCTL_SYNC, &sync) < 0) {
         saved_errno = errno;
         munmap(surface->data, allocation_size);
         surface->data = NULL;
-        close((int)allocation.fd);
+        close(dma_fd);
         return -saved_errno;
     }
     memset(surface->data, 0, allocation_size);
     sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
-    if (xioctl((int)allocation.fd, DMA_BUF_IOCTL_SYNC,
-               &sync) < 0) {
+    if (xioctl(dma_fd, DMA_BUF_IOCTL_SYNC, &sync) < 0) {
         saved_errno = errno;
         munmap(surface->data, allocation_size);
         surface->data = NULL;
-        close((int)allocation.fd);
+        close(dma_fd);
         return -saved_errno;
     }
-    surface->dma_fd = (int)allocation.fd;
+
+    surface->dma_fd = dma_fd;
     surface->dma_backed = true;
+    surface->gpu_native = true;
     surface->stride = (uint32_t)stride;
     surface->scanlines = (uint32_t)scanlines;
     surface->uv_offset = uv_offset;
@@ -220,7 +236,9 @@ static int wait_surface_access(const struct venus_surface *surface,
 int venus_surface_wait_for_device_read(
     const struct venus_surface *surface)
 {
-    return wait_surface_access(surface, POLLIN);
+    return wait_surface_access(
+        surface, surface && surface->gpu_native
+                     ? POLLOUT : POLLIN);
 }
 
 static int surface_cpu_sync(struct venus_surface *surface,
@@ -245,7 +263,9 @@ static int surface_cpu_sync(struct venus_surface *surface,
     if (!(flags & DMA_BUF_SYNC_END)) {
         status = wait_surface_access(
             surface,
-            flags & DMA_BUF_SYNC_WRITE ? POLLOUT : POLLIN);
+            (flags & DMA_BUF_SYNC_WRITE) ||
+                    surface->gpu_native
+                ? POLLOUT : POLLIN);
         if (status < 0)
             return status;
     }
@@ -601,10 +621,11 @@ static VAStatus create_surfaces_locked(
         surface_ids[created_count] = surface->id;
         venus_backend_log(
             backend,
-            "create-surface id=0x%x size=%ux%u bytes=%zu stride=%u dma=%s",
+            "create-surface id=0x%x size=%ux%u bytes=%zu stride=%u dma=%s allocator=%s",
             surface->id, width, height, surface->capacity,
             surface->stride,
-            surface->dma_backed ? "yes" : "no");
+            surface->dma_backed ? "yes" : "no",
+            surface->gpu_native ? "msm-gem" : "cpu");
         created_count++;
     }
 
