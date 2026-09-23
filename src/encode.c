@@ -558,6 +558,28 @@ static int apply_cqp_bitrate_override(uint32_t *bitrate)
     return 0;
 }
 
+static int apply_quality_qp_override(int32_t *qp, bool *overridden)
+{
+    const char *value = getenv("VENUS_VAAPI_QUALITY_QP");
+    unsigned long parsed;
+    char *end;
+
+    if (overridden)
+        *overridden = false;
+    if (!value || !value[0])
+        return 0;
+    errno = 0;
+    end = NULL;
+    parsed = strtoul(value, &end, 10);
+    if (errno || end == value || *end != '\0' ||
+        parsed < 1 || parsed > 51)
+        return -EINVAL;
+    *qp = (int32_t)parsed;
+    if (overridden)
+        *overridden = true;
+    return 0;
+}
+
 static uint32_t profile_to_v4l2(VAProfile profile)
 {
     switch (profile) {
@@ -856,6 +878,7 @@ static int open_encoder(
     uint32_t bitrate = parameters->bitrate;
     bool bitrate_supplied;
     bool cqp_compat;
+    bool quality_qp_overridden;
     uint32_t frames_per_second = parameters->frames_per_second;
     uint32_t encode_width;
     uint32_t encode_height;
@@ -935,9 +958,12 @@ static int open_encoder(
          parameters->slice_qp_delta;
     if (qp < 1 || qp > 51)
         return -EINVAL;
+    status = apply_quality_qp_override(&qp, &quality_qp_overridden);
+    if (status < 0)
+        return status;
 
     cqp_compat = config->rate_control == VA_RC_CQP;
-    if (cqp_compat) {
+    if (cqp_compat || quality_qp_overridden) {
         minimum_qp = qp > 2 ? (uint32_t)qp - 2u : 1u;
         maximum_qp = qp < 49 ? (uint32_t)qp + 2u : 51u;
     }
@@ -1151,6 +1177,9 @@ static int open_hevc_encoder(
          parameters->slice_qp_delta;
     if (qp < 1 || qp > 51)
         return -EINVAL;
+    status = apply_quality_qp_override(&qp, NULL);
+    if (status < 0)
+        return status;
     minimum_qp = qp > 2 ? (uint32_t)qp - 2u : 1u;
     maximum_qp = qp < 49 ? (uint32_t)qp + 2u : 51u;
     if (config->rate_control == VA_RC_CQP) {
