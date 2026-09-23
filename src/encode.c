@@ -712,6 +712,12 @@ static int open_encoder(
     uint32_t gop_size = 0;
     int status;
 
+    /* Keep Venus hardware encoding while staging GPU-written surfaces
+     * through a synchronized, aligned V4L2 OUTPUT buffer by default. */
+    output_dmabuf = output_dmabuf &&
+                    environment_flag_enabled(
+                        "VENUS_VAAPI_DIRECT_DMABUF");
+
     if (!parameters->sequence || profile == UINT32_MAX)
         return -EINVAL;
 
@@ -883,76 +889,6 @@ static int open_encoder(
     return 0;
 }
 
-static int prepare_surface_frame(
-    const struct venus_surface *surface,
-    unsigned int width, unsigned int height,
-    const uint8_t **frame_data, uint8_t **allocated,
-    size_t *frame_size)
-{
-    uint32_t source_stride;
-    size_t source_uv_offset;
-    size_t source_required;
-    size_t destination_pixels;
-    unsigned int row;
-
-    *frame_data = NULL;
-    *allocated = NULL;
-    *frame_size = 0;
-
-    if (!surface || width == 0 || height == 0 ||
-        width > surface->width || height > surface->height ||
-        width > SIZE_MAX / height)
-        return -EINVAL;
-
-    source_stride =
-        surface->stride ? surface->stride : surface->width;
-    source_uv_offset =
-        surface->uv_offset
-            ? surface->uv_offset
-            : (size_t)surface->width * surface->height;
-    if (source_stride < surface->width ||
-        source_stride > SIZE_MAX / (height / 2))
-        return -EINVAL;
-    source_required =
-        source_uv_offset +
-        (size_t)source_stride * (height / 2);
-    destination_pixels = (size_t)width * height;
-    if (surface->data_size < source_required ||
-        destination_pixels >
-            SIZE_MAX - destination_pixels / 2)
-        return -EINVAL;
-
-    *frame_size =
-        destination_pixels + destination_pixels / 2;
-    if (width == surface->width &&
-        height == surface->height &&
-        source_stride == width &&
-        source_uv_offset == destination_pixels) {
-        *frame_data = surface->data;
-        return 0;
-    }
-
-    *allocated = malloc(*frame_size);
-    if (!*allocated)
-        return -ENOMEM;
-
-    for (row = 0; row < height; row++)
-        memcpy(*allocated + (size_t)row * width,
-               surface->data +
-                   (size_t)row * source_stride,
-               width);
-
-    for (row = 0; row < height / 2; row++)
-        memcpy(*allocated + destination_pixels +
-                   (size_t)row * width,
-               surface->data + source_uv_offset +
-                   (size_t)row * source_stride,
-               width);
-
-    *frame_data = *allocated;
-    return 0;
-}
-
 VAStatus venus_encode_end_picture_locked(
     struct venus_backend *backend, struct venus_context *context,
     const struct venus_config *config)
@@ -960,8 +896,6 @@ VAStatus venus_encode_end_picture_locked(
     struct venus_h264_encode_parameters parameters;
     struct venus_buffer *coded;
     struct venus_surface *surface;
-    const uint8_t *frame_data;
-    uint8_t *allocated_frame;
     size_t coded_capacity;
     size_t expected_frame_size;
     uint64_t frame_tag;
@@ -1021,8 +955,6 @@ VAStatus venus_encode_end_picture_locked(
         }
     }
 
-    frame_data = NULL;
-    allocated_frame = NULL;
     expected_frame_size = 0;
     if (context->encode_dmabuf) {
         if (!surface->dma_backed || surface->dma_fd < 0)
@@ -1035,15 +967,7 @@ VAStatus venus_encode_end_picture_locked(
         status = venus_surface_begin_cpu_read(surface);
         if (status < 0)
             return venus_backend_encode_status_from_errno(status);
-
-        status = prepare_surface_frame(
-            surface, context->encode_width,
-            context->encode_height, &frame_data,
-            &allocated_frame, &expected_frame_size);
-        if (status < 0) {
-            venus_surface_end_cpu_read(surface);
-            return venus_backend_encode_status_from_errno(status);
-        }
+        expected_frame_size = surface->data_size;
     }
 
     context->encode_sequence++;
@@ -1065,7 +989,6 @@ VAStatus venus_encode_end_picture_locked(
     status = venus_encode_queue_coded_buffer_locked(
         context, coded->id, frame_tag);
     if (status < 0) {
-        free(allocated_frame);
         if (!context->encode_dmabuf)
             venus_surface_end_cpu_read(surface);
         return venus_backend_encode_status_from_errno(status);
@@ -1081,12 +1004,12 @@ VAStatus venus_encode_end_picture_locked(
             surface->scanlines, surface->uv_offset,
             frame_tag, store_packet, context);
     } else {
-        status = venus_v4l2_encoder_submit(
-            context->encoder, frame_data,
-            expected_frame_size, frame_tag,
-            store_packet, context);
+        status = venus_v4l2_encoder_submit_strided(
+            context->encoder, surface->data,
+            surface->data_size, surface->stride,
+            surface->scanlines, surface->uv_offset,
+            frame_tag, store_packet, context);
     }
-    free(allocated_frame);
     if (!context->encode_dmabuf) {
         int sync_status =
             venus_surface_end_cpu_read(surface);

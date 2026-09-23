@@ -59,6 +59,12 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
                               uint64_t tag,
                               venus_v4l2_packet_callback callback,
                               void *opaque);
+int venus_v4l2_encoder_submit_strided(
+    struct venus_v4l2_encoder *encoder,
+    const uint8_t *data, size_t size,
+    uint32_t stride, uint32_t scanlines, size_t uv_offset,
+    uint64_t tag, venus_v4l2_packet_callback callback,
+    void *opaque);
 int venus_v4l2_encoder_submit_dmabuf(
     struct venus_v4l2_encoder *encoder, int dma_fd,
     size_t dma_size, uint32_t stride, uint32_t scanlines,
