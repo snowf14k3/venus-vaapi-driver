@@ -78,6 +78,7 @@ struct venus_buffer {
     unsigned int map_count;
     bool coded_ready;
     bool coded_delivered;
+    bool input_done;
     size_t coded_size;
     unsigned int coded_packets;
     uint64_t coded_tag;

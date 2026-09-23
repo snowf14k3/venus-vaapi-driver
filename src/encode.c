@@ -638,7 +638,8 @@ int venus_encode_store_packet_locked(
     surface = venus_backend_find_surface(
         backend, buffer->source_surface_id);
     if (surface &&
-        surface->coded_buffer_id == buffer->id)
+        surface->coded_buffer_id == buffer->id &&
+        buffer->input_done)
         surface->encode_pending = false;
 
     venus_backend_log(
@@ -656,6 +657,35 @@ static int store_packet(const struct venus_v4l2_packet *packet,
                         void *opaque)
 {
     return venus_encode_store_packet_locked(opaque, packet);
+}
+
+static int store_output_done(uint64_t tag, void *opaque)
+{
+    struct venus_context *context = opaque;
+    struct venus_backend *backend = context->backend;
+    unsigned int index;
+
+    for (index = 0; index < VENUS_MAX_BUFFERS; index++) {
+        struct venus_buffer *buffer = &backend->buffers[index];
+        struct venus_surface *surface;
+
+        if (!buffer->used ||
+            buffer->type != VAEncCodedBufferType ||
+            buffer->context_id != context->id ||
+            buffer->coded_tag != tag)
+            continue;
+
+        buffer->input_done = true;
+        surface = venus_backend_find_surface(
+            backend, buffer->source_surface_id);
+        if (surface &&
+            surface->coded_buffer_id == buffer->id &&
+            buffer->coded_ready)
+            surface->encode_pending = false;
+        return 0;
+    }
+
+    return -ENOENT;
 }
 
 static int open_encoder(
@@ -822,6 +852,8 @@ static int open_encoder(
         .capture_buffer_size = v4l2_capture_size,
         .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
         .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
+        .output_done = store_output_done,
+        .output_done_opaque = context,
     };
 
     status = venus_v4l2_encoder_open(
@@ -1022,6 +1054,7 @@ VAStatus venus_encode_end_picture_locked(
     coded->coded_size = 0;
     coded->coded_ready = false;
     coded->coded_delivered = false;
+    coded->input_done = false;
     coded->coded_packets = 0;
     coded->coded_tag = 0;
     coded->source_surface_id = surface->id;
@@ -1142,6 +1175,8 @@ VAStatus venus_encode_sync_surface_locked(
     int timeout_ms)
 {
     struct venus_buffer *buffer;
+    struct venus_context *context;
+    int64_t deadline;
 
     if (!surface->encode_pending)
         return surface->ready
@@ -1152,9 +1187,43 @@ VAStatus venus_encode_sync_surface_locked(
         backend, surface->coded_buffer_id);
     if (!buffer)
         return VA_STATUS_ERROR_INVALID_BUFFER;
+    context = venus_backend_find_context(
+        backend, buffer->context_id);
+    if (!context || !context->encoder)
+        return VA_STATUS_ERROR_INVALID_CONTEXT;
 
-    return venus_encode_sync_buffer_locked(
-        backend, buffer, timeout_ms);
+    deadline = monotonic_milliseconds() + timeout_ms;
+    while (surface->encode_pending &&
+           monotonic_milliseconds() < deadline) {
+        int64_t remaining =
+            deadline - monotonic_milliseconds();
+        int wait_ms;
+        int status;
+
+        if (remaining <= 0)
+            break;
+        wait_ms = remaining > 1000 ? 1000 : (int)remaining;
+        status = venus_v4l2_encoder_pump(
+            context->encoder, wait_ms,
+            store_packet, context, NULL);
+        if (status == -ETIMEDOUT || status == -EAGAIN)
+            continue;
+        if (status < 0) {
+            venus_backend_log(
+                backend,
+                "encoder-pump failed context=0x%x operation=%s error=%d",
+                context->id,
+                venus_v4l2_encoder_last_operation(
+                    context->encoder),
+                -status);
+            return venus_backend_encode_status_from_errno(
+                status);
+        }
+    }
+
+    return surface->encode_pending
+               ? VA_STATUS_ERROR_HW_BUSY
+               : VA_STATUS_SUCCESS;
 }
 
 void venus_encode_close_context(struct venus_context *context)

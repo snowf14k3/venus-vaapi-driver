@@ -10,6 +10,9 @@
 
 struct venus_v4l2_encoder;
 
+typedef int (*venus_v4l2_output_done_callback)(uint64_t tag,
+                                                void *opaque);
+
 struct venus_v4l2_encoder_config {
     const char *device;
     uint32_t coded_format;
@@ -33,6 +36,8 @@ struct venus_v4l2_encoder_config {
     size_t capture_buffer_size;
     unsigned int output_buffers;
     unsigned int capture_buffers;
+    venus_v4l2_output_done_callback output_done;
+    void *output_done_opaque;
 };
 
 struct venus_v4l2_packet {

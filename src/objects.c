@@ -979,7 +979,15 @@ static VAStatus backend_destroy_buffer(VADriverContextP context,
             backend, buffer->source_surface_id);
 
         if (surface && surface->coded_buffer_id == buffer->id) {
-            surface->encode_pending = false;
+            if (surface->encode_pending) {
+                VAStatus status = venus_encode_sync_surface_locked(
+                    backend, surface, 5000);
+
+                if (status != VA_STATUS_SUCCESS) {
+                    pthread_mutex_unlock(&backend->mutex);
+                    return status;
+                }
+            }
             surface->coded_buffer_id = VA_INVALID_ID;
         }
     }

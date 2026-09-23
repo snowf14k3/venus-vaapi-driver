@@ -18,6 +18,7 @@ struct mapped_buffer {
     void *data;
     size_t length;
     int dma_fd;
+    uint64_t tag;
     bool queued;
 };
 
@@ -35,6 +36,8 @@ struct venus_v4l2_encoder {
     bool output_streaming;
     bool capture_streaming;
     bool stop_sent;
+    venus_v4l2_output_done_callback output_done;
+    void *output_done_opaque;
     char last_operation[64];
 };
 
@@ -47,6 +50,16 @@ static int xioctl(int fd, unsigned long request, void *argument)
     } while (result < 0 && errno == EINTR);
 
     return result;
+}
+
+static int64_t monotonic_milliseconds(void)
+{
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return (int64_t)now.tv_sec * 1000 +
+           now.tv_nsec / 1000000;
 }
 
 static int encoder_error(struct venus_v4l2_encoder *encoder,
@@ -528,6 +541,8 @@ int venus_v4l2_encoder_open(
     encoder->output_memory = config->output_dmabuf
                                  ? V4L2_MEMORY_DMABUF
                                  : V4L2_MEMORY_MMAP;
+    encoder->output_done = config->output_done;
+    encoder->output_done_opaque = config->output_done_opaque;
 
     encoder->fd =
         open(config->device, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -607,10 +622,20 @@ static int dequeue_output(struct venus_v4l2_encoder *encoder,
         if (buffer.index >= encoder->output_count)
             return -EIO;
 
+        uint64_t tag = encoder->output[buffer.index].tag;
+
         encoder->output[buffer.index].queued = false;
+        encoder->output[buffer.index].tag = 0;
         if (encoder->output[buffer.index].dma_fd >= 0) {
             close(encoder->output[buffer.index].dma_fd);
             encoder->output[buffer.index].dma_fd = -1;
+        }
+        if (tag && encoder->output_done) {
+            int status = encoder->output_done(
+                tag, encoder->output_done_opaque);
+
+            if (status < 0)
+                return status;
         }
         *made_progress = true;
     }
@@ -877,6 +902,7 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
         return -saved_errno;
     }
 
+    encoder->output[index].tag = tag;
     encoder->output[index].queued = true;
 
     /*
@@ -970,6 +996,7 @@ int venus_v4l2_encoder_submit_dmabuf(
     }
 
     encoder->output[index].dma_fd = imported_fd;
+    encoder->output[index].tag = tag;
     encoder->output[index].queued = true;
 
     if (!encoder->output_streaming) {
@@ -1018,15 +1045,34 @@ int venus_v4l2_encoder_stop(struct venus_v4l2_encoder *encoder)
 
 void venus_v4l2_encoder_close(struct venus_v4l2_encoder *encoder)
 {
+    int64_t deadline;
+
     if (!encoder)
         return;
 
-    if (encoder->capture_streaming)
-        stream_off(
-            encoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+    if (encoder->output_streaming &&
+        encoder->capture_streaming &&
+        !encoder->stop_sent &&
+        venus_v4l2_encoder_stop(encoder) == 0) {
+        deadline = monotonic_milliseconds() + 2000;
+        while (monotonic_milliseconds() < deadline) {
+            bool eos = false;
+            int status = venus_v4l2_encoder_pump(
+                encoder, 200, NULL, NULL, &eos);
+
+            if (eos || (status < 0 &&
+                        status != -EAGAIN &&
+                        status != -ETIMEDOUT))
+                break;
+        }
+    }
+
     if (encoder->output_streaming)
         stream_off(
             encoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+    if (encoder->capture_streaming)
+        stream_off(
+            encoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 
     release_buffers(
         encoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,

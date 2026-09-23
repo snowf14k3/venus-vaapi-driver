@@ -280,9 +280,18 @@ static VAStatus backend_begin_picture(VADriverContextP driver_context,
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
-    if (context->in_picture || surface->encode_pending) {
+    if (context->in_picture) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+    if (surface->encode_pending) {
+        VAStatus sync_status = venus_encode_sync_surface_locked(
+            backend, surface, VENUS_SYNC_TIMEOUT_MS);
+
+        if (sync_status != VA_STATUS_SUCCESS) {
+            pthread_mutex_unlock(&backend->mutex);
+            return sync_status;
+        }
     }
     if (config->entrypoint == VAEntrypointEncSlice &&
         (!surface->ready || surface->data_size == 0)) {
