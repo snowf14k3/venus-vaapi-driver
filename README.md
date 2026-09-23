@@ -6,8 +6,10 @@ initially targeting Xiaomi Redmi K20 Pro / Mi 9T Pro (Raphael, SM8150).
 ## Current status
 
 **H.264 High VLD and EncSlice are validated for progressive 8-bit video
-through Raphael's native 1080x2340 and 2340x1080 orientations. Other codecs
-remain disabled.**
+through Raphael's native 1080x2340 and 2340x1080 orientations. HEVC Main
+EncSlice supports progressive 8-bit I/P encoding; a 600-frame 1920x1080
+60 FPS source completed on Raphael, with the final decoded frame visually
+checked against its source. HEVC decoding and other codecs remain disabled.**
 
 The repository currently provides:
 
@@ -27,6 +29,8 @@ The repository currently provides:
   V4L2 controls, encoded CAPTURE packets and drain;
 - H.264 Baseline/Main/High EncSlice config, context, parameter,
   coded-buffer, sync and CPU-backed NV12 upload paths using that session;
+- HEVC Main EncSlice config, context and V4L2 controls using the same
+  stateful encoder session and NV12 surface paths;
 - CQP compatibility, packed headers and linear NV12 DRM PRIME export
   backed by the system DMA-BUF heap.
 
@@ -38,11 +42,13 @@ because libva searches compatible lower minor-version init symbols.
 | Codec | Decode | Encode |
 | --- | --- | --- |
 | H.264 Baseline/Main/High | Baseline and High validated; Main pending | High validated through 1080x2340 |
-| HEVC Main 8-bit | planned | planned |
+| HEVC Main 8-bit | planned | I/P encoding validated with FFmpeg |
 | VP8 | planned | planned |
 | VP9 Profile 0 | planned | not exposed |
 
 Only codec profiles with implemented VA buffer submission paths are exposed.
+FFmpeg aligns a 1080-high HEVC VA context to 1088 coded lines; clients must
+use their visible stream size when presenting the output.
 
 ## Build
 

@@ -9,7 +9,7 @@
 #include <string.h>
 
 #define VENUS_VENDOR_STRING \
-    "Qualcomm Venus stateful V4L2 VA-API backend 0.11.0"
+    "Qualcomm Venus stateful V4L2 VA-API backend 0.12.0"
 #define VENUS_INIT_NAME_INNER(major, minor) \
     __vaDriverInit_##major##_##minor
 #define VENUS_INIT_NAME(major, minor) \
@@ -50,7 +50,7 @@ VAStatus venus_driver_init(VADriverContextP context)
     context->pDriverData = backend;
     context->version_major = VA_MAJOR_VERSION;
     context->version_minor = VA_MINOR_VERSION;
-    context->max_profiles = 3;
+    context->max_profiles = 4;
     context->max_entrypoints = 2;
     context->max_attributes = 8;
     context->max_image_formats = 1;

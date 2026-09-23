@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <va/va_backend.h>
 #include <va/va_enc_h264.h>
+#include <va/va_enc_hevc.h>
 
 #define VENUS_MAX_CONFIGS 16
 #define VENUS_MAX_CONTEXTS 8
@@ -145,6 +146,9 @@ bool venus_backend_h264_vld_supported(const struct venus_backend *backend,
                                       VAProfile profile,
                                       VAEntrypoint entrypoint);
 bool venus_backend_h264_enc_supported(const struct venus_backend *backend,
+                                      VAProfile profile,
+                                      VAEntrypoint entrypoint);
+bool venus_backend_hevc_enc_supported(const struct venus_backend *backend,
                                       VAProfile profile,
                                       VAEntrypoint entrypoint);
 VAStatus venus_backend_encode_status_from_errno(int status);

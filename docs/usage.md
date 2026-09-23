@@ -40,6 +40,24 @@ LIBVA_DRIVER_NAME=venus ffmpeg -y \
 For 1080p, `-b:v 8M -maxrate 8M -bufsize 16M` is a reasonable starting
 point. Adjust bitrate and GOP length for the workload.
 
+## HEVC Main encoding with FFmpeg
+
+The encoder accepts progressive 8-bit 4:2:0 input and I/P frames:
+
+```bash
+LIBVA_DRIVER_NAME=venus ffmpeg -y \
+  -init_hw_device vaapi=venus:/dev/dri/renderD128 \
+  -filter_hw_device venus \
+  -i input.mp4 \
+  -map 0:v:0 -map '0:a?' \
+  -vf 'format=nv12,hwupload' \
+  -c:v hevc_vaapi -profile:v main \
+  -rc_mode VBR -b:v 8M -g 60 -bf 0 \
+  -c:a copy output.mp4
+```
+
+HEVC Main10 and B frames are not exposed by this driver.
+
 ## H.264 decoding with FFmpeg
 
 Decode through VA-API and download NV12 frames to the CPU:
@@ -60,7 +78,8 @@ environment when required.
 
 ## Current limits
 
-- progressive H.264 8-bit encoding and decoding;
+- progressive H.264 8-bit encoding and decoding, plus HEVC Main 8-bit
+  encoding;
 - no B frames; VA CBR and CQP requests keep frame rate control enabled and
   use the SM8150 VBR firmware route because its CBR route severely
   undershoots the requested bitrate. CQP also applies the requested initial
@@ -72,6 +91,9 @@ environment when required.
   cannot report cropping correctly;
 - H.264 encode level selection uses the IRIS1 firmware-auto contract from
   Raphael kernel patch 0029;
+- HEVC VBR/CBR constrains firmware QP to within two steps of the VA picture
+  QP; this prevents the progressive quality collapse observed with an
+  unrestricted QP range on SM8150;
 - per-frame packed raw-header requests enable the Venus hardware
   access-unit delimiter and preserve H.264 access-unit boundaries;
 - the first raw frame's separate SPS/PPS and IDR CAPTURE packets are joined

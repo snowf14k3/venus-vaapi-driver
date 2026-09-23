@@ -88,6 +88,17 @@ bool venus_backend_h264_enc_supported(const struct venus_backend *backend,
                                   VENUS_CODEC_H264);
 }
 
+bool venus_backend_hevc_enc_supported(const struct venus_backend *backend,
+                                      VAProfile profile,
+                                      VAEntrypoint entrypoint)
+{
+    return backend && profile == VAProfileHEVCMain &&
+           entrypoint == VAEntrypointEncSlice &&
+           venus_capabilities_has(&backend->capabilities,
+                                  VENUS_ROLE_ENCODER,
+                                  VENUS_CODEC_HEVC);
+}
+
 struct venus_config *venus_backend_find_config(struct venus_backend *backend,
                                                VAConfigID id)
 {
@@ -211,6 +222,12 @@ static VAStatus backend_query_profiles(VADriverContextP context,
     } else {
         *num_profiles = 0;
     }
+    if (venus_capabilities_has(&backend->capabilities,
+                               VENUS_ROLE_ENCODER, VENUS_CODEC_HEVC)) {
+        if (profiles)
+            profiles[*num_profiles] = VAProfileHEVCMain;
+        (*num_profiles)++;
+    }
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
 }
@@ -226,7 +243,8 @@ static VAStatus backend_query_entrypoints(VADriverContextP context,
         return VA_STATUS_ERROR_INVALID_PARAMETER;
 
     pthread_mutex_lock(&backend->mutex);
-    if (!venus_backend_h264_profile(profile)) {
+    if (!venus_backend_h264_profile(profile) &&
+        profile != VAProfileHEVCMain) {
         pthread_mutex_unlock(&backend->mutex);
         *num_entrypoints = 0;
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -240,6 +258,12 @@ static VAStatus backend_query_entrypoints(VADriverContextP context,
         (*num_entrypoints)++;
     }
     if (venus_backend_h264_enc_supported(
+            backend, profile, VAEntrypointEncSlice)) {
+        if (entrypoints)
+            entrypoints[*num_entrypoints] = VAEntrypointEncSlice;
+        (*num_entrypoints)++;
+    }
+    if (venus_backend_hevc_enc_supported(
             backend, profile, VAEntrypointEncSlice)) {
         if (entrypoints)
             entrypoints[*num_entrypoints] = VAEntrypointEncSlice;
@@ -270,6 +294,8 @@ static VAStatus backend_get_config_attributes(
     if (!venus_backend_h264_vld_supported(
             backend, profile, entrypoint) &&
         !venus_backend_h264_enc_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_hevc_enc_supported(
             backend, profile, entrypoint)) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -352,6 +378,8 @@ static VAStatus backend_create_config(
     if (!venus_backend_h264_vld_supported(
             backend, profile, entrypoint) &&
         !venus_backend_h264_enc_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_hevc_enc_supported(
             backend, profile, entrypoint)) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;

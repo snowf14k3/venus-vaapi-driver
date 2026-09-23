@@ -56,6 +56,14 @@ if [[ -z "${DRIVER}" ]]; then
     exit 1
 fi
 
+ALIAS="$(dirname -- "${DRIVER}")/msm_drv_video.so"
+if [[ -e "${ALIAS}" && ! -L "${ALIAS}" ]]; then
+    echo "不会覆盖现有的非符号链接: ${ALIAS}" >&2
+    exit 1
+fi
+"${SUDO[@]}" ln -sfn venus_drv_video.so "${ALIAS}"
+
 echo "PASS：已安装 ${DRIVER}"
+echo "PASS：已将 MSM VA-API 别名指向 ${DRIVER}"
 echo "当前终端启用：export LIBVA_DRIVER_NAME=venus"
 echo "验证：LIBVA_DRIVER_NAME=venus vainfo --display drm --device /dev/dri/renderD128"

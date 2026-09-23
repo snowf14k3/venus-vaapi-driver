@@ -30,6 +30,18 @@ struct venus_h264_encode_parameters {
     bool has_aud;
 };
 
+struct venus_hevc_encode_parameters {
+    const VAEncSequenceParameterBufferHEVC *sequence;
+    const VAEncPictureParameterBufferHEVC *picture;
+    uint32_t bitrate;
+    uint32_t frames_per_second;
+    int8_t slice_qp_delta;
+    uint32_t num_ctu_in_slice;
+    bool has_slice;
+    bool intra;
+    bool has_aud;
+};
+
 static int64_t monotonic_milliseconds(void)
 {
     struct timespec timestamp;
@@ -148,7 +160,7 @@ static int parse_frame_rate(uint32_t value, uint32_t *result)
 
 static int parse_misc_parameter(
     const struct venus_buffer *buffer,
-    struct venus_h264_encode_parameters *parameters)
+    uint32_t *bitrate, uint32_t *frames_per_second)
 {
     const VAEncMiscParameterBuffer *header;
     size_t size = buffer_bytes(buffer);
@@ -166,7 +178,7 @@ static int parse_misc_parameter(
         rate_control =
             (const VAEncMiscParameterRateControl *)header->data;
         if (rate_control->bits_per_second)
-            parameters->bitrate = rate_control->bits_per_second;
+            *bitrate = rate_control->bits_per_second;
         return 0;
     }
     case VAEncMiscParameterTypeFrameRate: {
@@ -177,7 +189,7 @@ static int parse_misc_parameter(
         frame_rate =
             (const VAEncMiscParameterFrameRate *)header->data;
         return parse_frame_rate(
-            frame_rate->framerate, &parameters->frames_per_second);
+            frame_rate->framerate, frames_per_second);
     }
     case VAEncMiscParameterTypeHRD:
     case VAEncMiscParameterTypeQualityLevel:
@@ -284,7 +296,9 @@ static int collect_parameters(
             packed = NULL;
             break;
         case VAEncMiscParameterBufferType:
-            status = parse_misc_parameter(buffer, parameters);
+            status = parse_misc_parameter(
+                buffer, &parameters->bitrate,
+                &parameters->frames_per_second);
             if (status < 0)
                 return status;
             break;
@@ -298,6 +312,96 @@ static int collect_parameters(
     if (!parameters->picture || !parameters->has_slice ||
         packed)
         return -EINVAL;
+    return 0;
+}
+
+static int collect_hevc_parameters(
+    struct venus_backend *backend, struct venus_context *context,
+    struct venus_hevc_encode_parameters *parameters)
+{
+    const VAEncPackedHeaderParameterBuffer *packed = NULL;
+    size_t index;
+
+    memset(parameters, 0, sizeof(*parameters));
+    for (index = 0; index < context->pending_count; index++) {
+        struct venus_buffer *buffer = venus_backend_find_buffer(
+            backend, context->pending[index]);
+        int status;
+
+        if (!buffer || buffer_bytes(buffer) == 0)
+            return -EINVAL;
+        switch (buffer->type) {
+        case VAEncSequenceParameterBufferType:
+            if (parameters->sequence || buffer->num_elements != 1 ||
+                buffer->element_size <
+                    sizeof(VAEncSequenceParameterBufferHEVC))
+                return -EINVAL;
+            parameters->sequence =
+                (const VAEncSequenceParameterBufferHEVC *)buffer->data;
+            break;
+        case VAEncPictureParameterBufferType:
+            if (parameters->picture || buffer->num_elements != 1 ||
+                buffer->element_size <
+                    sizeof(VAEncPictureParameterBufferHEVC))
+                return -EINVAL;
+            parameters->picture =
+                (const VAEncPictureParameterBufferHEVC *)buffer->data;
+            break;
+        case VAEncSliceParameterBufferType: {
+            const VAEncSliceParameterBufferHEVC *slice;
+
+            if (parameters->has_slice || buffer->num_elements != 1 ||
+                buffer->element_size <
+                    sizeof(VAEncSliceParameterBufferHEVC))
+                return -EINVAL;
+            slice = (const VAEncSliceParameterBufferHEVC *)buffer->data;
+            if (slice->slice_segment_address != 0 ||
+                slice->num_ctu_in_slice == 0 ||
+                (slice->slice_type != 1 && slice->slice_type != 2))
+                return -ENOTSUP;
+            parameters->slice_qp_delta = slice->slice_qp_delta;
+            parameters->num_ctu_in_slice = slice->num_ctu_in_slice;
+            parameters->intra = slice->slice_type == 2;
+            parameters->has_slice = true;
+            break;
+        }
+        case VAEncPackedHeaderParameterBufferType:
+            if (packed || buffer->num_elements != 1 ||
+                buffer->element_size <
+                    sizeof(VAEncPackedHeaderParameterBuffer))
+                return -EINVAL;
+            packed =
+                (const VAEncPackedHeaderParameterBuffer *)buffer->data;
+            if (!(packed->type & VENUS_H264_PACKED_HEADERS))
+                return -ENOTSUP;
+            break;
+        case VAEncPackedHeaderDataBufferType:
+            if (!packed ||
+                packed->bit_length > buffer_bytes(buffer) * 8)
+                return -EINVAL;
+            if (packed->type == VAEncPackedHeaderRawData)
+                parameters->has_aud = true;
+            packed = NULL;
+            break;
+        case VAEncMiscParameterBufferType:
+            status = parse_misc_parameter(
+                buffer, &parameters->bitrate,
+                &parameters->frames_per_second);
+            if (status < 0)
+                return status;
+            break;
+        case VAIQMatrixBufferType:
+            break;
+        default:
+            return -ENOTSUP;
+        }
+    }
+
+    if (!parameters->picture || !parameters->has_slice || packed)
+        return -EINVAL;
+    if (parameters->picture->pic_fields.bits.idr_pic_flag &&
+        !parameters->intra)
+        return -ENOTSUP;
     return 0;
 }
 
@@ -888,10 +992,10 @@ static int open_encoder(
         .bitrate = bitrate,
         .rate_control_enabled = true,
         .bitrate_mode = bitrate_mode,
-        .h264_i_qp = (uint32_t)qp,
-        .h264_p_qp = (uint32_t)qp,
-        .h264_min_qp = minimum_qp,
-        .h264_max_qp = maximum_qp,
+        .i_qp = (uint32_t)qp,
+        .p_qp = (uint32_t)qp,
+        .min_qp = minimum_qp,
+        .max_qp = maximum_qp,
         .gop_size = gop_size,
         .h264_profile = profile,
         .h264_level = level,
@@ -903,7 +1007,7 @@ static int open_encoder(
         .h264_transform_8x8 =
             parameters->picture->
                 pic_fields.bits.transform_8x8_mode_flag,
-        .h264_aud = parameters->has_aud,
+        .aud = parameters->has_aud,
         .output_dmabuf = output_dmabuf,
         .capture_buffer_size = v4l2_capture_size,
         .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
@@ -939,24 +1043,209 @@ static int open_encoder(
     return 0;
 }
 
+static uint32_t hevc_level_to_v4l2(uint8_t level_idc)
+{
+    static const struct {
+        uint8_t idc;
+        uint32_t control;
+    } levels[] = {
+        { 30, V4L2_MPEG_VIDEO_HEVC_LEVEL_1 },
+        { 60, V4L2_MPEG_VIDEO_HEVC_LEVEL_2 },
+        { 63, V4L2_MPEG_VIDEO_HEVC_LEVEL_2_1 },
+        { 90, V4L2_MPEG_VIDEO_HEVC_LEVEL_3 },
+        { 93, V4L2_MPEG_VIDEO_HEVC_LEVEL_3_1 },
+        { 120, V4L2_MPEG_VIDEO_HEVC_LEVEL_4 },
+        { 123, V4L2_MPEG_VIDEO_HEVC_LEVEL_4_1 },
+        { 150, V4L2_MPEG_VIDEO_HEVC_LEVEL_5 },
+        { 153, V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1 },
+        { 156, V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2 },
+        { 180, V4L2_MPEG_VIDEO_HEVC_LEVEL_6 },
+        { 183, V4L2_MPEG_VIDEO_HEVC_LEVEL_6_1 },
+        { 186, V4L2_MPEG_VIDEO_HEVC_LEVEL_6_2 },
+    };
+    size_t index;
+
+    for (index = 0; index < sizeof(levels) / sizeof(levels[0]); index++) {
+        if (levels[index].idc == level_idc)
+            return levels[index].control;
+    }
+    return UINT32_MAX;
+}
+
+static int open_hevc_encoder(
+    struct venus_backend *backend, struct venus_context *context,
+    const struct venus_config *config,
+    const struct venus_hevc_encode_parameters *parameters,
+    bool output_dmabuf)
+{
+    const VAEncSequenceParameterBufferHEVC *sequence =
+        parameters->sequence;
+    const VAEncPictureParameterBufferHEVC *picture =
+        parameters->picture;
+    struct venus_v4l2_encoder_config encoder_config;
+    struct venus_v4l2_error error;
+    uint32_t level;
+    uint32_t bitrate = parameters->bitrate;
+    uint32_t frames_per_second = parameters->frames_per_second;
+    uint32_t minimum_qp = 1;
+    uint32_t maximum_qp = 51;
+    uint32_t gop_size;
+    uint32_t min_cb;
+    uint32_t ctu;
+    uint32_t ctu_count;
+    size_t capture_size;
+    int32_t qp;
+    int status;
+
+    if (environment_flag_enabled("VENUS_VAAPI_STAGING"))
+        output_dmabuf = false;
+    if (!sequence || !picture || !parameters->intra ||
+        !picture->pic_fields.bits.idr_pic_flag ||
+        sequence->general_profile_idc != 1 ||
+        sequence->seq_fields.bits.chroma_format_idc != 1 ||
+        sequence->seq_fields.bits.bit_depth_luma_minus8 != 0 ||
+        sequence->seq_fields.bits.bit_depth_chroma_minus8 != 0 ||
+        sequence->seq_fields.bits.separate_colour_plane_flag ||
+        sequence->seq_fields.bits.pcm_enabled_flag ||
+        sequence->ip_period > 1 ||
+        picture->num_tile_columns_minus1 ||
+        picture->num_tile_rows_minus1 ||
+        picture->pic_fields.bits.tiles_enabled_flag)
+        return -ENOTSUP;
+    level = hevc_level_to_v4l2(sequence->general_level_idc);
+    if (level == UINT32_MAX)
+        return -ENOTSUP;
+    if (sequence->log2_min_luma_coding_block_size_minus3 > 3 ||
+        sequence->log2_diff_max_min_luma_coding_block_size > 3 ||
+        sequence->log2_min_luma_coding_block_size_minus3 +
+            sequence->log2_diff_max_min_luma_coding_block_size > 3)
+        return -EINVAL;
+    min_cb = 1u <<
+        (sequence->log2_min_luma_coding_block_size_minus3 + 3);
+    ctu = min_cb <<
+        sequence->log2_diff_max_min_luma_coding_block_size;
+    if (sequence->pic_width_in_luma_samples < context->width ||
+        sequence->pic_height_in_luma_samples < context->height ||
+        sequence->pic_width_in_luma_samples - context->width >= 16 ||
+        sequence->pic_height_in_luma_samples - context->height >= 16)
+        return -EINVAL;
+    ctu_count =
+        ((sequence->pic_width_in_luma_samples + ctu - 1) / ctu) *
+        ((sequence->pic_height_in_luma_samples + ctu - 1) / ctu);
+    if (parameters->num_ctu_in_slice != ctu_count)
+        return -ENOTSUP;
+
+    status = venus_v4l2_encoder_compressed_size(
+        context->width, context->height, &capture_size);
+    if (status < 0)
+        return status;
+    if (bitrate == 0)
+        bitrate = sequence->bits_per_second;
+    if (frames_per_second == 0 && sequence->vui_num_units_in_tick &&
+        sequence->vui_time_scale)
+        frames_per_second = sequence->vui_time_scale /
+                            sequence->vui_num_units_in_tick;
+    if (frames_per_second == 0 || frames_per_second > 240)
+        frames_per_second = VENUS_ENCODE_DEFAULT_FPS;
+    qp = (int32_t)picture->pic_init_qp +
+         parameters->slice_qp_delta;
+    if (qp < 1 || qp > 51)
+        return -EINVAL;
+    minimum_qp = qp > 2 ? (uint32_t)qp - 2u : 1u;
+    maximum_qp = qp < 49 ? (uint32_t)qp + 2u : 51u;
+    if (config->rate_control == VA_RC_CQP) {
+        if (bitrate == 0) {
+            status = venus_encode_cqp_bitrate(
+                context->width, context->height,
+                frames_per_second, (uint32_t)qp, &bitrate);
+            if (status < 0)
+                return status;
+        }
+    }
+    if (bitrate == 0)
+        bitrate = VENUS_ENCODE_DEFAULT_BITRATE;
+    if (bitrate > INT_MAX)
+        return -ERANGE;
+    gop_size = sequence->intra_idr_period;
+    if (gop_size == 0)
+        gop_size = sequence->intra_period;
+    if (gop_size == 0)
+        gop_size = INT_MAX;
+    if (environment_flag_enabled("VENUS_VAAPI_INTRA_ONLY"))
+        gop_size = 1;
+
+    context->encode_width = context->width;
+    context->encode_height = context->height;
+    encoder_config = (struct venus_v4l2_encoder_config) {
+        .device = backend->capabilities.encoder_path,
+        .coded_format = V4L2_PIX_FMT_HEVC,
+        .width = context->encode_width,
+        .height = context->encode_height,
+        .frames_per_second = frames_per_second,
+        .bitrate = bitrate,
+        .rate_control_enabled = true,
+        .bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
+        .i_qp = (uint32_t)qp,
+        .p_qp = (uint32_t)qp,
+        .min_qp = minimum_qp,
+        .max_qp = maximum_qp,
+        .gop_size = gop_size,
+        .hevc_level = level,
+        .hevc_tier = sequence->general_tier_flag,
+        .aud = parameters->has_aud,
+        .output_dmabuf = output_dmabuf,
+        .capture_buffer_size = capture_size,
+        .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
+        .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
+        .output_done = store_output_done,
+        .output_done_opaque = context,
+    };
+    status = venus_v4l2_encoder_open(
+        &encoder_config, &context->encoder, &error);
+    if (status < 0) {
+        venus_backend_log(
+            backend,
+            "HEVC encoder-open failed operation=%s error=%d",
+            error.operation[0] ? error.operation : "none", -status);
+        return status;
+    }
+    context->encode_dmabuf = output_dmabuf;
+    venus_backend_log(
+        backend,
+        "HEVC encoder-open context=0x%x size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u input=%s",
+        context->id, context->encode_width,
+        context->encode_height, frames_per_second,
+        config->rate_control, bitrate, qp, gop_size,
+        output_dmabuf ? "dmabuf" : "mmap");
+    return 0;
+}
+
 VAStatus venus_encode_end_picture_locked(
     struct venus_backend *backend, struct venus_context *context,
     const struct venus_config *config)
 {
     struct venus_h264_encode_parameters parameters;
+    struct venus_hevc_encode_parameters hevc_parameters;
     struct venus_buffer *coded;
     struct venus_surface *surface;
+    VABufferID coded_buffer_id;
+    bool hevc = config->profile == VAProfileHEVCMain;
     size_t coded_capacity;
     size_t expected_frame_size;
     uint64_t frame_tag;
     int status;
 
-    status = collect_parameters(backend, context, &parameters);
+    status = hevc
+                 ? collect_hevc_parameters(
+                       backend, context, &hevc_parameters)
+                 : collect_parameters(backend, context, &parameters);
     if (status < 0)
         return venus_backend_encode_status_from_errno(status);
 
+    coded_buffer_id = hevc ? hevc_parameters.picture->coded_buf
+                           : parameters.picture->coded_buf;
     coded = venus_backend_find_buffer(
-        backend, parameters.picture->coded_buf);
+        backend, coded_buffer_id);
     surface = venus_backend_find_surface(backend, context->target);
     if (!coded || coded->context_id != context->id ||
         coded->type != VAEncCodedBufferType)
@@ -973,12 +1262,22 @@ VAStatus venus_encode_end_picture_locked(
         return VA_STATUS_ERROR_INVALID_BUFFER;
 
     if (!context->encoder) {
-        status = open_encoder(
-            backend, context, config, &parameters,
-            surface->dma_backed);
+        status = hevc
+                     ? open_hevc_encoder(
+                           backend, context, config,
+                           &hevc_parameters, surface->dma_backed)
+                     : open_encoder(
+                           backend, context, config, &parameters,
+                           surface->dma_backed);
         if (status < 0)
             return venus_backend_encode_status_from_errno(status);
-    } else if (parameters.sequence) {
+    } else if (hevc && hevc_parameters.sequence) {
+        if (hevc_parameters.sequence->pic_width_in_luma_samples !=
+                context->encode_width ||
+            hevc_parameters.sequence->pic_height_in_luma_samples !=
+                context->encode_height)
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+    } else if (!hevc && parameters.sequence) {
         uint32_t width;
         uint32_t height;
 
@@ -992,7 +1291,8 @@ VAStatus venus_encode_end_picture_locked(
 
     if (environment_flag_enabled("VENUS_VAAPI_INTRA_ONLY") ||
         (context->encode_sequence > 0 &&
-         parameters.picture->pic_fields.bits.idr_pic_flag)) {
+         (hevc ? hevc_parameters.intra
+               : parameters.picture->pic_fields.bits.idr_pic_flag))) {
         status = venus_v4l2_encoder_force_keyframe(context->encoder);
         if (status < 0) {
             venus_backend_log(
