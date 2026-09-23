@@ -94,10 +94,11 @@ environment when required.
 - HEVC VBR/CBR constrains firmware QP to within two steps of the VA picture
   QP; this prevents the progressive quality collapse observed with an
   unrestricted QP range on SM8150;
-- `VENUS_VAAPI_QUALITY_QP=20` overrides the initial H.264/HEVC picture QP
-  and keeps the firmware within two QP steps. Lower values improve detail but
-  can exceed a client's requested bitrate; use this only with enough network
-  bandwidth;
+- VBR/CBR encoding chooses a quality QP from the client's bitrate,
+  resolution and frame rate, while retaining a better client-requested QP.
+  The firmware can adjust within two QP steps. `VENUS_VAAPI_QUALITY_QP`
+  remains an optional manual override; lower values improve detail but can
+  exceed the requested bitrate;
 - per-frame packed raw-header requests enable the Venus hardware
   access-unit delimiter and preserve H.264 access-unit boundaries;
 - the first raw frame's separate SPS/PPS and IDR CAPTURE packets are joined

@@ -580,6 +580,31 @@ static int apply_quality_qp_override(int32_t *qp, bool *overridden)
     return 0;
 }
 
+static int32_t quality_qp_from_bitrate(
+    uint32_t width, uint32_t height, uint32_t frames_per_second,
+    uint32_t bitrate, int32_t client_qp)
+{
+    uint64_t pixel_rate =
+        (uint64_t)width * height * frames_per_second;
+    uint64_t quality_steps;
+    int32_t budget_qp;
+
+    if (!pixel_rate || !bitrate)
+        return client_qp;
+
+    /*
+     * The IRIS1 VBR path can spend far less than the requested bitrate when
+     * left to choose QP freely. Use the stream's bits per pixel per frame
+     * to set a quality floor, while retaining the client's better QP if it
+     * requests one. Firmware still adjusts within the narrow QP range.
+     */
+    quality_steps = (uint64_t)bitrate * 16u / pixel_rate;
+    if (quality_steps > 14u)
+        quality_steps = 14u;
+    budget_qp = 32 - (int32_t)quality_steps;
+    return client_qp < budget_qp ? client_qp : budget_qp;
+}
+
 static uint32_t profile_to_v4l2(VAProfile profile)
 {
     switch (profile) {
@@ -963,10 +988,12 @@ static int open_encoder(
         return status;
 
     cqp_compat = config->rate_control == VA_RC_CQP;
-    if (cqp_compat || quality_qp_overridden) {
-        minimum_qp = qp > 2 ? (uint32_t)qp - 2u : 1u;
-        maximum_qp = qp < 49 ? (uint32_t)qp + 2u : 51u;
-    }
+    if (!cqp_compat && !quality_qp_overridden)
+        qp = quality_qp_from_bitrate(
+            encode_width, encode_height, frames_per_second,
+            bitrate, qp);
+    minimum_qp = qp > 2 ? (uint32_t)qp - 2u : 1u;
+    maximum_qp = qp < 49 ? (uint32_t)qp + 2u : 51u;
 
     if (cqp_compat && !bitrate_supplied) {
         status = venus_encode_cqp_bitrate(
@@ -1112,6 +1139,7 @@ static int open_hevc_encoder(
     struct venus_v4l2_error error;
     uint32_t level;
     uint32_t bitrate = parameters->bitrate;
+    bool quality_qp_overridden;
     uint32_t frames_per_second = parameters->frames_per_second;
     uint32_t minimum_qp = 1;
     uint32_t maximum_qp = 51;
@@ -1177,9 +1205,14 @@ static int open_hevc_encoder(
          parameters->slice_qp_delta;
     if (qp < 1 || qp > 51)
         return -EINVAL;
-    status = apply_quality_qp_override(&qp, NULL);
+    status = apply_quality_qp_override(&qp, &quality_qp_overridden);
     if (status < 0)
         return status;
+    if (config->rate_control != VA_RC_CQP &&
+        !quality_qp_overridden)
+        qp = quality_qp_from_bitrate(
+            context->width, context->height,
+            frames_per_second, bitrate, qp);
     minimum_qp = qp > 2 ? (uint32_t)qp - 2u : 1u;
     maximum_qp = qp < 49 ? (uint32_t)qp + 2u : 51u;
     if (config->rate_control == VA_RC_CQP) {
