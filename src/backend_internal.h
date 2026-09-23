@@ -79,6 +79,10 @@ struct venus_buffer {
     bool coded_ready;
     bool coded_delivered;
     bool input_done;
+    bool input_sample_valid;
+    uint8_t input_sample_min;
+    uint8_t input_sample_max;
+    uint32_t input_sample_bright;
     size_t coded_size;
     unsigned int coded_packets;
     uint64_t coded_tag;

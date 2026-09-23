@@ -55,6 +55,45 @@ static bool environment_flag_enabled(const char *name)
     return value && value[0] && strcmp(value, "0") != 0;
 }
 
+static void sample_input_luma(const struct venus_surface *surface,
+                              unsigned int width, unsigned int height,
+                              struct venus_buffer *coded)
+{
+    uint8_t minimum = UINT8_MAX;
+    uint8_t maximum = 0;
+    uint32_t bright = 0;
+    unsigned int row;
+    unsigned int column;
+
+    if (!surface->data || !surface->stride || !width || !height)
+        return;
+
+    for (row = 0; row < 36; row++) {
+        size_t y = (size_t)row * height / 36u;
+
+        for (column = 0; column < 64; column++) {
+            size_t x = (size_t)column * width / 64u;
+            size_t offset = y * surface->stride + x;
+            uint8_t value;
+
+            if (offset >= surface->data_size)
+                return;
+            value = surface->data[offset];
+            if (value < minimum)
+                minimum = value;
+            if (value > maximum)
+                maximum = value;
+            if (value > 32)
+                bright++;
+        }
+    }
+
+    coded->input_sample_valid = true;
+    coded->input_sample_min = minimum;
+    coded->input_sample_max = maximum;
+    coded->input_sample_bright = bright;
+}
+
 static void dump_encoded_packet(
     const struct venus_v4l2_packet *packet)
 {
@@ -650,6 +689,18 @@ int venus_encode_store_packet_locked(
         packet->flags,
         (unsigned long long)packet->tag,
         context->encode_queue_count);
+    if (environment_flag_enabled("VENUS_VAAPI_TRACE_INPUT") &&
+        (buffer->coded_tag <= 8 || buffer->coded_size < 6000))
+        venus_backend_log(
+            backend,
+            "input-sample tag=%llu surface=0x%x valid=%u bright=%u/2304 min=%u max=%u coded=%zu",
+            (unsigned long long)buffer->coded_tag,
+            buffer->source_surface_id,
+            buffer->input_sample_valid ? 1u : 0u,
+            buffer->input_sample_bright,
+            buffer->input_sample_min,
+            buffer->input_sample_max,
+            buffer->coded_size);
     return 0;
 }
 
@@ -978,12 +1029,37 @@ VAStatus venus_encode_end_picture_locked(
     coded->coded_ready = false;
     coded->coded_delivered = false;
     coded->input_done = false;
+    coded->input_sample_valid = false;
+    coded->input_sample_min = 0;
+    coded->input_sample_max = 0;
+    coded->input_sample_bright = 0;
     coded->coded_packets = 0;
     coded->coded_tag = 0;
     coded->source_surface_id = surface->id;
     memset(&coded->coded_segment, 0,
            sizeof(coded->coded_segment));
     coded->coded_segment.buf = coded->data;
+
+    if (environment_flag_enabled("VENUS_VAAPI_TRACE_INPUT")) {
+        int sample_status = context->encode_dmabuf
+                                ? venus_surface_begin_cpu_read(surface)
+                                : 0;
+
+        if (sample_status == 0) {
+            sample_input_luma(
+                surface, context->encode_width,
+                context->encode_height, coded);
+            if (context->encode_dmabuf)
+                sample_status =
+                    venus_surface_end_cpu_read(surface);
+        }
+        if (sample_status < 0)
+            venus_backend_log(
+                backend,
+                "input-sample sync failed tag=%llu error=%d",
+                (unsigned long long)frame_tag,
+                -sample_status);
+    }
 
     status = venus_encode_queue_coded_buffer_locked(
         context, coded->id, frame_tag);
