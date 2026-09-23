@@ -86,6 +86,9 @@ static int allocate_dma_surface(struct venus_surface *surface,
         "/dev/dma_heap/default_cma_region",
     };
     struct dma_heap_allocation_data allocation = { 0 };
+    struct dma_buf_sync sync = {
+        .flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE,
+    };
     size_t stride;
     size_t scanlines;
     size_t chroma_scanlines;
@@ -152,7 +155,24 @@ static int allocate_dma_surface(struct venus_surface *surface,
         return -saved_errno;
     }
 
+    if (xioctl((int)allocation.fd, DMA_BUF_IOCTL_SYNC,
+               &sync) < 0) {
+        saved_errno = errno;
+        munmap(surface->data, allocation_size);
+        surface->data = NULL;
+        close((int)allocation.fd);
+        return -saved_errno;
+    }
     memset(surface->data, 0, allocation_size);
+    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
+    if (xioctl((int)allocation.fd, DMA_BUF_IOCTL_SYNC,
+               &sync) < 0) {
+        saved_errno = errno;
+        munmap(surface->data, allocation_size);
+        surface->data = NULL;
+        close((int)allocation.fd);
+        return -saved_errno;
+    }
     surface->dma_fd = (int)allocation.fd;
     surface->dma_backed = true;
     surface->stride = (uint32_t)stride;

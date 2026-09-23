@@ -712,11 +712,10 @@ static int open_encoder(
     uint32_t gop_size = 0;
     int status;
 
-    /* Keep Venus hardware encoding while staging GPU-written surfaces
-     * through a synchronized, aligned V4L2 OUTPUT buffer by default. */
-    output_dmabuf = output_dmabuf &&
-                    environment_flag_enabled(
-                        "VENUS_VAAPI_DIRECT_DMABUF");
+    /* Allow a synchronized MMAP staging path when diagnosing DMA imports;
+     * the normal path imports the exported VA surface into Venus directly. */
+    if (environment_flag_enabled("VENUS_VAAPI_STAGING"))
+        output_dmabuf = false;
 
     if (!parameters->sequence || profile == UINT32_MAX)
         return -EINVAL;
