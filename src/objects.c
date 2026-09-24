@@ -852,11 +852,11 @@ static VAStatus wait_coded_delivery_locked(
         return VA_STATUS_SUCCESS;
 
     while (!buffer->coded_delivered &&
-           buffer->coded_tag !=
+           buffer->coded_sequence !=
                context->encode_delivery_sequence) {
         VABufferID buffer_id = buffer->id;
 
-        if (buffer->coded_tag <
+        if (buffer->coded_sequence <
             context->encode_delivery_sequence)
             return VA_STATUS_ERROR_OPERATION_FAILED;
         if (attempts++ >= 5000)
@@ -878,9 +878,10 @@ static VAStatus wait_coded_delivery_locked(
     if (!buffer->coded_delivered) {
         venus_backend_log(
             backend,
-            "deliver-coded buffer=0x%x tag=%llu expected=%llu bytes=%zu",
+            "deliver-coded buffer=0x%x tag=%llu sequence=%llu expected=%llu bytes=%zu",
             buffer->id,
             (unsigned long long)buffer->coded_tag,
+            (unsigned long long)buffer->coded_sequence,
             (unsigned long long)
                 context->encode_delivery_sequence,
             buffer->coded_size);

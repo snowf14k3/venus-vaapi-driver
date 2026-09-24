@@ -695,6 +695,7 @@ int venus_encode_queue_coded_buffer_locked(
            VENUS_MAX_SURFACES;
     context->encode_queue[tail] = buffer_id;
     context->encode_queue_count++;
+    buffer->coded_sequence = context->encode_sequence;
     buffer->coded_tag = tag;
     return 0;
 }
@@ -736,8 +737,10 @@ static void rollback_coded_buffer(struct venus_context *context,
         context->encode_queue_count--;
         buffer = venus_backend_find_buffer(
             context->backend, buffer_id);
-        if (buffer)
+        if (buffer) {
+            buffer->coded_sequence = 0;
             buffer->coded_tag = 0;
+        }
     }
 }
 
@@ -1080,6 +1083,7 @@ static int open_encoder(
         return status;
     }
     context->encode_dmabuf = output_dmabuf;
+    context->encode_frames_per_second = frames_per_second;
 
     venus_backend_log(
         backend,
@@ -1272,6 +1276,7 @@ static int open_hevc_encoder(
         return status;
     }
     context->encode_dmabuf = output_dmabuf;
+    context->encode_frames_per_second = frames_per_second;
     venus_backend_log(
         backend,
         "HEVC encoder-open context=0x%x size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u input=%s",
@@ -1367,6 +1372,9 @@ VAStatus venus_encode_end_picture_locked(
         }
     }
 
+    if (!context->encode_frames_per_second)
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+
     expected_frame_size = 0;
     if (context->encode_dmabuf) {
         if (!surface->dma_backed || surface->dma_fd < 0)
@@ -1385,7 +1393,8 @@ VAStatus venus_encode_end_picture_locked(
     context->encode_sequence++;
     if (context->encode_sequence == 0)
         context->encode_sequence++;
-    frame_tag = context->encode_sequence;
+    frame_tag = 1u + (context->encode_sequence - 1u) * 1000000u /
+                        context->encode_frames_per_second;
 
     coded->coded_size = 0;
     coded->coded_ready = false;
@@ -1396,6 +1405,7 @@ VAStatus venus_encode_end_picture_locked(
     coded->input_sample_max = 0;
     coded->input_sample_bright = 0;
     coded->coded_packets = 0;
+    coded->coded_sequence = 0;
     coded->coded_tag = 0;
     coded->source_surface_id = surface->id;
     memset(&coded->coded_segment, 0,

@@ -182,7 +182,8 @@ int main(int argc, char **argv)
         }
 
         status = venus_v4l2_encoder_submit(
-            encoder, frame, frame_size, frame_index + 1,
+            encoder, frame, frame_size,
+            1u + (uint64_t)frame_index * 1000000u / frames_per_second,
             write_packet, &run);
         if (status < 0)
             goto finish;

@@ -87,6 +87,7 @@ struct venus_buffer {
     uint32_t input_sample_bright;
     size_t coded_size;
     unsigned int coded_packets;
+    uint64_t coded_sequence;
     uint64_t coded_tag;
     VASurfaceID source_surface_id;
     VACodedBufferSegment coded_segment;
@@ -122,6 +123,7 @@ struct venus_context {
     VABufferID encode_queue[VENUS_MAX_SURFACES];
     size_t encode_queue_head;
     size_t encode_queue_count;
+    uint32_t encode_frames_per_second;
     uint64_t encode_sequence;
     uint64_t encode_delivery_sequence;
 };
