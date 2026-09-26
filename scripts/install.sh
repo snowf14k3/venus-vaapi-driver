@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 for command in meson ninja pkg-config cc; do
     command -v "${command}" >/dev/null 2>&1 || {
-        echo "缺少命令: ${command}" >&2
+        echo "Missing command: ${command}" >&2
         exit 1
     }
 done
@@ -15,7 +15,7 @@ if (( EUID == 0 )); then
     SUDO=()
 else
     command -v sudo >/dev/null 2>&1 || {
-        echo "缺少 sudo" >&2
+        echo "Missing sudo" >&2
         exit 1
     }
     SUDO=(sudo)
@@ -43,18 +43,18 @@ else
 fi
 
 if [[ -z "${DRIVER}" ]]; then
-    echo "安装完成，但没有在 /usr/lib 下找到 venus_drv_video.so" >&2
+    echo "Installation completed, but venus_drv_video.so was not found under /usr/lib" >&2
     exit 1
 fi
 
 ALIAS="$(dirname -- "${DRIVER}")/msm_drv_video.so"
 if [[ -e "${ALIAS}" && ! -L "${ALIAS}" ]]; then
-    echo "不会覆盖现有的非符号链接: ${ALIAS}" >&2
+    echo "Refusing to overwrite an existing non-symlink: ${ALIAS}" >&2
     exit 1
 fi
 "${SUDO[@]}" ln -sfn venus_drv_video.so "${ALIAS}"
 
-echo "PASS：已安装 ${DRIVER}"
-echo "PASS：已将 MSM VA-API 别名指向 ${DRIVER}"
-echo "当前终端启用：export LIBVA_DRIVER_NAME=venus"
-echo "验证：LIBVA_DRIVER_NAME=venus vainfo --display drm --device /dev/dri/renderD128"
+echo "PASS: Installed ${DRIVER}"
+echo "PASS: Pointed the MSM VA-API alias to ${DRIVER}"
+echo "Enable in the current shell: export LIBVA_DRIVER_NAME=venus"
+echo "Verify: LIBVA_DRIVER_NAME=venus vainfo --display drm --device /dev/dri/renderD128"
