@@ -15,6 +15,12 @@
 #define VENUS_ACCESS_UNIT_OVERHEAD 4096u
 #define VENUS_SYNC_TIMEOUT_MS 30000
 
+/*
+ * VA decode collects picture and slice buffers during Begin/Render/EndPicture.
+ * The H.264 adapter turns that batch into one Annex-B access unit, submits it
+ * to stateful V4L2, and copies the returned NV12 frame into the requested VA
+ * surface. The copy keeps surface ownership independent from the MMAP queue.
+ */
 static int64_t monotonic_milliseconds(void)
 {
     struct timespec timestamp;
@@ -78,12 +84,6 @@ int venus_decode_store_frame_locked(
     if (status < 0)
         return status;
 
-    venus_backend_log(
-        backend,
-        "capture surface=0x%x tag=%llu bytes=%zu visible=%ux%u coded=%ux%u stride=%u",
-        surface->id, (unsigned long long)frame->tag,
-        surface->data_size, surface->width, surface->height,
-        frame->width, frame->height, stride);
     return 0;
 }
 
@@ -157,13 +157,6 @@ static VAStatus backend_create_context(
         status = venus_v4l2_decoder_open(
             &decoder_config, &context->decoder, &decoder_error);
         if (status < 0) {
-            venus_backend_log(
-                backend,
-                "create-context decoder-open failed operation=%s error=%d",
-                decoder_error.operation[0]
-                    ? decoder_error.operation
-                    : "none",
-                -status);
             pthread_mutex_unlock(&backend->mutex);
             return venus_backend_status_from_errno(status);
         }
@@ -190,10 +183,6 @@ static VAStatus backend_create_context(
     }
 
     *result = context->id;
-    venus_backend_log(backend,
-                      "create-context id=0x%x config=0x%x size=%ux%u targets=%d",
-                      context->id, config_id, context->width,
-                      context->height, num_render_targets);
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
 }
@@ -307,9 +296,6 @@ static VAStatus backend_begin_picture(VADriverContextP driver_context,
         surface->ready = false;
         surface->data_size = 0;
     }
-    venus_backend_log(backend,
-                      "begin-picture context=0x%x surface=0x%x entrypoint=%d",
-                      context_id, render_target, config->entrypoint);
 
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
@@ -468,11 +454,6 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
         clear_pending(context);
         context->in_picture = false;
         context->target = VA_INVALID_ID;
-        if (encode_status != VA_STATUS_SUCCESS)
-            venus_backend_log(
-                backend,
-                "end-picture encode failed context=0x%x status=%d",
-                context_id, encode_status);
         pthread_mutex_unlock(&backend->mutex);
         return encode_status;
     }
@@ -499,10 +480,6 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
     if (status < 0)
         goto finish;
 
-    venus_backend_log(backend,
-                      "end-picture context=0x%x surface=0x%x batches=%zu access-unit=%zu",
-                      context_id, context->target, num_batches,
-                      access_unit_size);
     status = venus_v4l2_decoder_submit(
         context->decoder, access_unit, access_unit_size,
         context->target, venus_decode_store_frame_locked, backend);
@@ -512,10 +489,6 @@ finish:
     clear_pending(context);
     context->in_picture = false;
     context->target = VA_INVALID_ID;
-    if (status < 0)
-        venus_backend_log(backend,
-                          "end-picture failed context=0x%x error=%d",
-                          context_id, -status);
     pthread_mutex_unlock(&backend->mutex);
     return status < 0 ? venus_backend_status_from_errno(status)
                       : VA_STATUS_SUCCESS;
@@ -576,9 +549,6 @@ static VAStatus backend_sync_surface(VADriverContextP driver_context,
 
     status = sync_surface_locked(
         backend, surface, VENUS_SYNC_TIMEOUT_MS);
-    venus_backend_log(backend,
-                      "sync-surface id=0x%x status=%d bytes=%zu",
-                      surface_id, status, surface->data_size);
     pthread_mutex_unlock(&backend->mutex);
     return status;
 }
@@ -643,10 +613,6 @@ static VAStatus backend_sync_buffer(
 
     status = venus_encode_sync_buffer_locked(
         backend, buffer, (int)timeout_ms);
-    venus_backend_log(
-        backend,
-        "sync-buffer id=0x%x status=%d bytes=%zu",
-        buffer_id, status, buffer->coded_size);
     pthread_mutex_unlock(&backend->mutex);
     return status;
 }

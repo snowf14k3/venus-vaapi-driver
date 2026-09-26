@@ -4,6 +4,7 @@
 
 #include <va/va_backend.h>
 
+/* Entry point exported to libva for the selected VA API version. */
 VAStatus venus_driver_init(VADriverContextP context);
 
 #endif

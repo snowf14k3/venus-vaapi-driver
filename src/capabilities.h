@@ -6,6 +6,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * This is the driver's small capability model.  It records formats reported
+ * by the qcom-venus V4L2 nodes after applying the userspace allowlist; it is
+ * deliberately not a promise that every VA-API profile is implemented.
+ */
 enum venus_codec {
     VENUS_CODEC_H264 = 1u << 0,
     VENUS_CODEC_HEVC = 1u << 1,

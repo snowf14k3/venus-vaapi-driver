@@ -38,6 +38,11 @@ struct venus_v4l2_decoder {
     char last_operation[64];
 };
 
+/*
+ * The stateful decoder must see coded OUTPUT first.  Venus announces the
+ * decoded size through a source-change event, after which NV12 CAPTURE can be
+ * configured and queued.
+ */
 static int xioctl(int fd, unsigned long request, void *argument)
 {
     int result;

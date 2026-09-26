@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 struct venus_bit_writer {
+    /* H.264 syntax is written most-significant bit first into the RBSP. */
     uint8_t *data;
     size_t capacity;
     size_t bit_count;

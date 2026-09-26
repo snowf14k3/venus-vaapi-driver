@@ -7,6 +7,7 @@
 #include <va/va.h>
 
 struct venus_h264_slice_batch {
+    /* VA may split one access unit across several slice-data buffers. */
     const VASliceParameterBufferH264 *parameters;
     size_t num_parameters;
     const uint8_t *data;

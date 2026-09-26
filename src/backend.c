@@ -4,33 +4,22 @@
 #include "backend_internal.h"
 
 #include <errno.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * The backend serializes VA object lifetime and V4L2 submission through one
+ * mutex.  Codec-specific code is kept in decode.c and encode.c; this file
+ * owns profile negotiation, object lookup, and VA status translation.
+ */
 struct venus_backend *venus_backend_from_context(VADriverContextP context)
 {
     return context ? context->pDriverData : NULL;
 }
 
-void venus_backend_log(const struct venus_backend *backend,
-                       const char *format, ...)
-{
-    va_list arguments;
-
-    if (!backend || !backend->debug)
-        return;
-
-    fputs("venus-vaapi: ", stderr);
-    va_start(arguments, format);
-    vfprintf(stderr, format, arguments);
-    va_end(arguments);
-    fputc('\n', stderr);
-}
-
 VAStatus venus_backend_status_from_errno(int status)
 {
+    /* V4L2 helpers return negative errno values; VA clients expect VAStatus. */
     switch (-status) {
     case ENOMEM:
         return VA_STATUS_ERROR_ALLOCATION_FAILED;
@@ -347,11 +336,6 @@ static VAStatus backend_get_config_attributes(
             break;
         }
 
-        venus_backend_log(
-            backend,
-            "config-attribute profile=%d entrypoint=%d type=%u value=0x%x",
-            profile, entrypoint, attributes[index].type,
-            attributes[index].value);
     }
 
     pthread_mutex_unlock(&backend->mutex);
@@ -434,11 +418,6 @@ static VAStatus backend_create_config(
             .packed_headers = packed_headers,
         };
         *config_id = config->id;
-        venus_backend_log(
-            backend,
-            "create-config id=0x%x profile=%d entrypoint=%d rc=0x%x packed=0x%x",
-            config->id, profile, entrypoint,
-            rate_control, packed_headers);
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_SUCCESS;
     }
@@ -546,13 +525,6 @@ VAStatus venus_backend_create(const struct venus_capabilities *capabilities,
     }
 
     backend->capabilities = *capabilities;
-    backend->debug = getenv("VENUS_VAAPI_LOG") != NULL;
-    venus_backend_log(
-        backend, "probe decoder=%s decode_mask=0x%x encoder=%s encode_mask=0x%x",
-        capabilities->decoder_path[0] ? capabilities->decoder_path : "none",
-        capabilities->decode_codecs,
-        capabilities->encoder_path[0] ? capabilities->encoder_path : "none",
-        capabilities->encode_codecs);
     *result = backend;
     return VA_STATUS_SUCCESS;
 }

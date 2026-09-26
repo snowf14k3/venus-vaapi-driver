@@ -41,6 +41,11 @@ struct venus_v4l2_encoder {
     char last_operation[64];
 };
 
+/*
+ * Raphael's Venus encoder is stateful: raw NV12 is queued on OUTPUT and
+ * encoded access units are dequeued from CAPTURE.  CAPTURE stays MMAP-backed;
+ * only the raw OUTPUT queue may use imported DMA-BUF surfaces.
+ */
 static int xioctl(int fd, unsigned long request, void *argument)
 {
     int result;

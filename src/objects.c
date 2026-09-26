@@ -17,6 +17,11 @@
 #include <drm.h>
 #include <drm/msm_drm.h>
 
+/*
+ * VA surfaces are CPU-visible NV12 allocations backed by MSM GEM.  The
+ * render-node GEM allocation is exported as DMA-BUF for GPU clients and is
+ * explicitly synchronized before CPU or Venus access.
+ */
 static int nv12_size(unsigned int width, unsigned int height,
                      size_t *size)
 {
@@ -44,6 +49,7 @@ static int xioctl(int fd, unsigned long request, void *argument)
     return result;
 }
 
+/* Align allocations to the larger stride/scanline requirements of Venus. */
 static int align_size(size_t value, size_t alignment,
                       size_t *result)
 {
@@ -619,13 +625,6 @@ static VAStatus create_surfaces_locked(
         surface->context_id = VA_INVALID_ID;
         created[created_count] = surface;
         surface_ids[created_count] = surface->id;
-        venus_backend_log(
-            backend,
-            "create-surface id=0x%x size=%ux%u bytes=%zu stride=%u dma=%s allocator=%s",
-            surface->id, width, height, surface->capacity,
-            surface->stride,
-            surface->dma_backed ? "yes" : "no",
-            surface->gpu_native ? "msm-gem" : "cpu");
         created_count++;
     }
 
@@ -767,9 +766,6 @@ static VAStatus backend_create_buffer(
     }
 
     *buffer_id = buffer->id;
-    venus_backend_log(backend,
-                      "create-buffer id=0x%x context=0x%x type=%d elements=%u size=%u",
-                      buffer->id, context_id, type, num_elements, size);
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
 }
@@ -876,15 +872,6 @@ static VAStatus wait_coded_delivery_locked(
     }
 
     if (!buffer->coded_delivered) {
-        venus_backend_log(
-            backend,
-            "deliver-coded buffer=0x%x tag=%llu sequence=%llu expected=%llu bytes=%zu",
-            buffer->id,
-            (unsigned long long)buffer->coded_tag,
-            (unsigned long long)buffer->coded_sequence,
-            (unsigned long long)
-                context->encode_delivery_sequence,
-            buffer->coded_size);
         context->encode_delivery_sequence++;
         buffer->coded_delivered = true;
     }
@@ -1207,10 +1194,6 @@ static VAStatus backend_derive_image(VADriverContextP context,
         surface->data, surface->capacity,
         surface->stride, surface->uv_offset,
         surface->id, image);
-    if (status == VA_STATUS_SUCCESS)
-        venus_backend_log(backend,
-                          "derive-image surface=0x%x image=0x%x bytes=%u",
-                          surface->id, image->image_id, image->data_size);
     pthread_mutex_unlock(&backend->mutex);
     return status;
 }
@@ -1412,11 +1395,6 @@ static VAStatus backend_export_surface_handle(
         (uint32_t)surface->uv_offset;
     prime->layers[1].pitch[0] = surface->stride;
 
-    venus_backend_log(
-        backend,
-        "export-surface id=0x%x fd=%d size=%zu stride=%u uv=%zu",
-        surface->id, exported_fd, surface->capacity,
-        surface->stride, surface->uv_offset);
     pthread_mutex_unlock(&backend->mutex);
     return VA_STATUS_SUCCESS;
 }

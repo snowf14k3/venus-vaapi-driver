@@ -14,6 +14,11 @@
 #define VENUS_VAAPI_PROBE_LIMIT 64
 #endif
 
+/*
+ * Venus exposes separate stateful decoder and encoder video nodes.  We scan
+ * the bounded /dev/video range and remember one node for each role, rather
+ * than assuming a fixed node number on every Raphael boot.
+ */
 static int xioctl(int fd, unsigned long request, void *argument)
 {
     int result;
@@ -51,6 +56,7 @@ static bool device_role(const struct v4l2_capability *cap,
 static void enumerate_codecs(int fd, enum venus_role role,
                              struct venus_capabilities *caps)
 {
+    /* OUTPUT carries coded data for decode and raw frames for encode. */
     struct v4l2_fmtdesc format = {
         .type = role == VENUS_ROLE_DECODER
                     ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE

@@ -2,7 +2,6 @@
 #include "backend_internal.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
@@ -11,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 #include <va/va_enc_h264.h>
 
 #define VENUS_ENCODE_OUTPUT_BUFFERS 4u
@@ -20,6 +18,11 @@
 #define VENUS_ENCODE_MAX_BITRATE 160000000u
 #define VENUS_ENCODE_DEFAULT_FPS 30u
 
+/*
+ * VA encoding is accumulated between BeginPicture and EndPicture. This layer
+ * translates the collected VA parameter buffers into the stateful V4L2
+ * controls, then associates returned coded packets with their input surfaces.
+ */
 struct venus_h264_encode_parameters {
     const VAEncSequenceParameterBufferH264 *sequence;
     const VAEncPictureParameterBufferH264 *picture;
@@ -65,78 +68,6 @@ static bool environment_flag_enabled(const char *name)
     const char *value = getenv(name);
 
     return value && value[0] && strcmp(value, "0") != 0;
-}
-
-static void sample_input_luma(const struct venus_surface *surface,
-                              unsigned int width, unsigned int height,
-                              struct venus_buffer *coded)
-{
-    uint8_t minimum = UINT8_MAX;
-    uint8_t maximum = 0;
-    uint32_t bright = 0;
-    unsigned int row;
-    unsigned int column;
-
-    if (!surface->data || !surface->stride || !width || !height)
-        return;
-
-    for (row = 0; row < 36; row++) {
-        size_t y = (size_t)row * height / 36u;
-
-        for (column = 0; column < 64; column++) {
-            size_t x = (size_t)column * width / 64u;
-            size_t offset = y * surface->stride + x;
-            uint8_t value;
-
-            if (offset >= surface->data_size)
-                return;
-            value = surface->data[offset];
-            if (value < minimum)
-                minimum = value;
-            if (value > maximum)
-                maximum = value;
-            if (value > 32)
-                bright++;
-        }
-    }
-
-    coded->input_sample_valid = true;
-    coded->input_sample_min = minimum;
-    coded->input_sample_max = maximum;
-    coded->input_sample_bright = bright;
-}
-
-static void dump_encoded_packet(
-    const struct venus_v4l2_packet *packet)
-{
-    const char *path = getenv("VENUS_VAAPI_DUMP_H264");
-    size_t offset = 0;
-    int fd;
-
-    if (!path || !path[0] || !packet || !packet->data ||
-        packet->size == 0)
-        return;
-
-    fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
-              0600);
-    if (fd < 0)
-        return;
-
-    while (offset < packet->size) {
-        ssize_t written =
-            write(fd, packet->data + offset,
-                  packet->size - offset);
-
-        if (written < 0) {
-            if (errno == EINTR)
-                continue;
-            break;
-        }
-        if (written == 0)
-            break;
-        offset += (size_t)written;
-    }
-    close(fd);
 }
 
 static int parse_frame_rate(uint32_t value, uint32_t *result)
@@ -762,7 +693,6 @@ int venus_encode_store_packet_locked(
         return -EINVAL;
 
     backend = context->backend;
-    dump_encoded_packet(packet);
     buffer = NULL;
     buffer_id = VA_INVALID_ID;
     for (offset = 0; offset < context->encode_queue_count;
@@ -815,14 +745,6 @@ int venus_encode_store_packet_locked(
           V4L2_BUF_FLAG_PFRAME |
           V4L2_BUF_FLAG_BFRAME)) != 0;
     if (!complete) {
-        venus_backend_log(
-            backend,
-            "encoded part buffer=0x%x surface=0x%x bytes=%zu packets=%u flags=0x%x driver-tag=0x%llx complete=0 queued=%zu",
-            buffer->id, buffer->source_surface_id,
-            buffer->coded_size, buffer->coded_packets,
-            packet->flags,
-            (unsigned long long)packet->tag,
-            context->encode_queue_count);
         return 0;
     }
 
@@ -835,26 +757,6 @@ int venus_encode_store_packet_locked(
         buffer->input_done)
         surface->encode_pending = false;
 
-    venus_backend_log(
-        backend,
-        "encoded buffer=0x%x surface=0x%x bytes=%zu packets=%u flags=0x%x driver-tag=0x%llx complete=1 queued=%zu",
-        buffer->id, buffer->source_surface_id,
-        buffer->coded_size, buffer->coded_packets,
-        packet->flags,
-        (unsigned long long)packet->tag,
-        context->encode_queue_count);
-    if (environment_flag_enabled("VENUS_VAAPI_TRACE_INPUT") &&
-        (buffer->coded_tag <= 8 || buffer->coded_size < 6000))
-        venus_backend_log(
-            backend,
-            "input-sample tag=%llu surface=0x%x valid=%u bright=%u/2304 min=%u max=%u coded=%zu",
-            (unsigned long long)buffer->coded_tag,
-            buffer->source_surface_id,
-            buffer->input_sample_valid ? 1u : 0u,
-            buffer->input_sample_bright,
-            buffer->input_sample_min,
-            buffer->input_sample_max,
-            buffer->coded_size);
     return 0;
 }
 
@@ -918,11 +820,6 @@ static int open_encoder(
     uint32_t gop_size = 0;
     int status;
 
-    /* Allow a synchronized MMAP staging path when diagnosing DMA imports;
-     * the normal path imports the exported VA surface into Venus directly. */
-    if (environment_flag_enabled("VENUS_VAAPI_STAGING"))
-        output_dmabuf = false;
-
     if (!parameters->sequence || profile == UINT32_MAX)
         return -EINVAL;
 
@@ -947,12 +844,6 @@ static int open_encoder(
         &encode_width, &encode_height);
     if (status < 0)
         return status;
-    if (status > 0)
-        venus_backend_log(
-            backend,
-            "native-mode context=%ux%u visible=%ux%u",
-            context->width, context->height,
-            encode_width, encode_height);
     if ((encode_width + 15u) / 16u * 16u != context->width ||
         (encode_height + 15u) / 16u * 16u != context->height)
         return -EINVAL;
@@ -1075,28 +966,11 @@ static int open_encoder(
     status = venus_v4l2_encoder_open(
         &encoder_config, &context->encoder, &error);
     if (status < 0) {
-        venus_backend_log(
-            backend,
-            "encoder-open failed operation=%s error=%d",
-            error.operation[0] ? error.operation : "none",
-            -status);
         return status;
     }
     context->encode_dmabuf = output_dmabuf;
     context->encode_frames_per_second = frames_per_second;
 
-    venus_backend_log(
-        backend,
-        "encoder-open context=0x%x profile=%d requested-level=%u v4l2-level=%u(auto) size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d range=%u..%u gop=%u aud=%u input=%s output=%u capture=%u",
-        context->id, config->profile,
-        parameters->sequence->level_idc, level,
-        context->encode_width, context->encode_height,
-        frames_per_second, config->rate_control,
-        bitrate, qp, minimum_qp, maximum_qp, gop_size,
-        parameters->has_aud ? 1u : 0u,
-        output_dmabuf ? "dmabuf" : "mmap",
-        venus_v4l2_encoder_output_count(context->encoder),
-        venus_v4l2_encoder_capture_count(context->encoder));
     return 0;
 }
 
@@ -1155,8 +1029,6 @@ static int open_hevc_encoder(
     int32_t qp;
     int status;
 
-    if (environment_flag_enabled("VENUS_VAAPI_STAGING"))
-        output_dmabuf = false;
     if (!sequence || !picture || !parameters->intra ||
         !picture->pic_fields.bits.idr_pic_flag ||
         sequence->general_profile_idc != 1 ||
@@ -1269,21 +1141,10 @@ static int open_hevc_encoder(
     status = venus_v4l2_encoder_open(
         &encoder_config, &context->encoder, &error);
     if (status < 0) {
-        venus_backend_log(
-            backend,
-            "HEVC encoder-open failed operation=%s error=%d",
-            error.operation[0] ? error.operation : "none", -status);
         return status;
     }
     context->encode_dmabuf = output_dmabuf;
     context->encode_frames_per_second = frames_per_second;
-    venus_backend_log(
-        backend,
-        "HEVC encoder-open context=0x%x size=%ux%u fps=%u rc=0x%x bitrate=%u qp=%d gop=%u input=%s",
-        context->id, context->encode_width,
-        context->encode_height, frames_per_second,
-        config->rate_control, bitrate, qp, gop_size,
-        output_dmabuf ? "dmabuf" : "mmap");
     return 0;
 }
 
@@ -1298,7 +1159,6 @@ VAStatus venus_encode_end_picture_locked(
     VABufferID coded_buffer_id;
     bool hevc = config->profile == VAProfileHEVCMain;
     size_t coded_capacity;
-    size_t expected_frame_size;
     uint64_t frame_tag;
     int status;
 
@@ -1362,12 +1222,6 @@ VAStatus venus_encode_end_picture_locked(
                : parameters.picture->pic_fields.bits.idr_pic_flag))) {
         status = venus_v4l2_encoder_force_keyframe(context->encoder);
         if (status < 0) {
-            venus_backend_log(
-                backend,
-                "force-keyframe failed context=0x%x operation=%s error=%d",
-                context->id,
-                venus_v4l2_encoder_last_operation(context->encoder),
-                -status);
             return venus_backend_encode_status_from_errno(status);
         }
     }
@@ -1375,19 +1229,16 @@ VAStatus venus_encode_end_picture_locked(
     if (!context->encode_frames_per_second)
         return VA_STATUS_ERROR_OPERATION_FAILED;
 
-    expected_frame_size = 0;
     if (context->encode_dmabuf) {
         if (!surface->dma_backed || surface->dma_fd < 0)
             return VA_STATUS_ERROR_INVALID_SURFACE;
         status = venus_surface_wait_for_device_read(surface);
         if (status < 0)
             return venus_backend_encode_status_from_errno(status);
-        expected_frame_size = surface->capacity;
     } else {
         status = venus_surface_begin_cpu_read(surface);
         if (status < 0)
             return venus_backend_encode_status_from_errno(status);
-        expected_frame_size = surface->data_size;
     }
 
     context->encode_sequence++;
@@ -1400,10 +1251,6 @@ VAStatus venus_encode_end_picture_locked(
     coded->coded_ready = false;
     coded->coded_delivered = false;
     coded->input_done = false;
-    coded->input_sample_valid = false;
-    coded->input_sample_min = 0;
-    coded->input_sample_max = 0;
-    coded->input_sample_bright = 0;
     coded->coded_packets = 0;
     coded->coded_sequence = 0;
     coded->coded_tag = 0;
@@ -1411,27 +1258,6 @@ VAStatus venus_encode_end_picture_locked(
     memset(&coded->coded_segment, 0,
            sizeof(coded->coded_segment));
     coded->coded_segment.buf = coded->data;
-
-    if (environment_flag_enabled("VENUS_VAAPI_TRACE_INPUT")) {
-        int sample_status = context->encode_dmabuf
-                                ? venus_surface_begin_cpu_read(surface)
-                                : 0;
-
-        if (sample_status == 0) {
-            sample_input_luma(
-                surface, context->encode_width,
-                context->encode_height, coded);
-            if (context->encode_dmabuf)
-                sample_status =
-                    venus_surface_end_cpu_read(surface);
-        }
-        if (sample_status < 0)
-            venus_backend_log(
-                backend,
-                "input-sample sync failed tag=%llu error=%d",
-                (unsigned long long)frame_tag,
-                -sample_status);
-    }
 
     status = venus_encode_queue_coded_buffer_locked(
         context, coded->id, frame_tag);
@@ -1461,31 +1287,15 @@ VAStatus venus_encode_end_picture_locked(
         int sync_status =
             venus_surface_end_cpu_read(surface);
 
-        if (sync_status < 0)
-            venus_backend_log(
-                backend,
-                "surface CPU sync end failed surface=0x%x error=%d",
-                surface->id, -sync_status);
+        if (sync_status < 0 && status == 0)
+            status = sync_status;
     }
     if (status < 0) {
         rollback_coded_buffer(context, coded->id);
         surface->encode_pending = false;
-        venus_backend_log(
-            backend,
-            "encoder-submit failed context=0x%x operation=%s error=%d",
-            context->id,
-            venus_v4l2_encoder_last_operation(
-                context->encoder),
-            -status);
         return venus_backend_encode_status_from_errno(status);
     }
 
-    venus_backend_log(
-        backend,
-        "encode-submit context=0x%x surface=0x%x coded=0x%x frame=%llu bytes=%zu",
-        context->id, surface->id, coded->id,
-        (unsigned long long)frame_tag,
-        expected_frame_size);
     return VA_STATUS_SUCCESS;
 }
 
@@ -1523,13 +1333,6 @@ VAStatus venus_encode_sync_buffer_locked(
         if (status == -ETIMEDOUT || status == -EAGAIN)
             continue;
         if (status < 0) {
-            venus_backend_log(
-                backend,
-                "encoder-pump failed context=0x%x operation=%s error=%d",
-                context->id,
-                venus_v4l2_encoder_last_operation(
-                    context->encoder),
-                -status);
             return venus_backend_encode_status_from_errno(
                 status);
         }
@@ -1579,13 +1382,6 @@ VAStatus venus_encode_sync_surface_locked(
         if (status == -ETIMEDOUT || status == -EAGAIN)
             continue;
         if (status < 0) {
-            venus_backend_log(
-                backend,
-                "encoder-pump failed context=0x%x operation=%s error=%d",
-                context->id,
-                venus_v4l2_encoder_last_operation(
-                    context->encoder),
-                -status);
             return venus_backend_encode_status_from_errno(
                 status);
         }

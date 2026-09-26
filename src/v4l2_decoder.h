@@ -10,6 +10,7 @@
 
 struct venus_v4l2_decoder;
 
+/* Stateful decode uses coded OUTPUT and NV12 CAPTURE buffers. */
 struct venus_v4l2_decoder_config {
     const char *device;
     uint32_t coded_format;
@@ -23,6 +24,7 @@ struct venus_v4l2_decoder_config {
 struct venus_v4l2_frame {
     const uint8_t *data;
     size_t size;
+    /* The VA surface ID is carried through the V4L2 timestamp/tag field. */
     uint64_t tag;
     uint32_t flags;
     uint32_t width;
@@ -33,6 +35,7 @@ struct venus_v4l2_frame {
 typedef int (*venus_v4l2_frame_callback)(
     const struct venus_v4l2_frame *frame, void *opaque);
 
+/* Open/configure the stateful node; CAPTURE is completed after source-change. */
 int venus_v4l2_decoder_open(
     const struct venus_v4l2_decoder_config *config,
     struct venus_v4l2_decoder **decoder,
@@ -42,6 +45,7 @@ int venus_v4l2_decoder_submit(struct venus_v4l2_decoder *decoder,
                               uint64_t tag,
                               venus_v4l2_frame_callback callback,
                               void *opaque);
+/* Pump DQBUF until a frame, EOS, or the caller's timeout is reached. */
 int venus_v4l2_decoder_pump(struct venus_v4l2_decoder *decoder,
                             int timeout_ms,
                             venus_v4l2_frame_callback callback,

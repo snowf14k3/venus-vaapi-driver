@@ -14,6 +14,8 @@ struct venus_codec_map {
     bool encode;
 };
 
+/* Formats are intentionally allowlisted; probing alone must not expose an
+ * unimplemented codec through VA-API. */
 static const struct venus_codec_map codec_map[] = {
     { V4L2_PIX_FMT_H264, VENUS_CODEC_H264, "H.264", true, true },
     { V4L2_PIX_FMT_HEVC, VENUS_CODEC_HEVC, "HEVC Main", true, true },

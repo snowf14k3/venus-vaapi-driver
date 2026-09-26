@@ -13,6 +13,12 @@ struct byte_writer {
     size_t length;
 };
 
+/*
+ * VA decode supplies picture/slice parameter buffers but not a complete
+ * Annex-B header.  This adapter reconstructs SPS/PPS, applies emulation
+ * prevention, and prefixes each NAL so the stateful Venus decoder can accept
+ * the stream one access unit at a time.
+ */
 static int append_bytes(struct byte_writer *writer, const void *data,
                         size_t size)
 {

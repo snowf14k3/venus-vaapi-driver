@@ -10,6 +10,7 @@
 
 struct venus_v4l2_encoder;
 
+/* Called when an OUTPUT buffer is released by Venus. */
 typedef int (*venus_v4l2_output_done_callback)(uint64_t tag,
                                                 void *opaque);
 
@@ -45,6 +46,7 @@ struct venus_v4l2_encoder_config {
 struct venus_v4l2_packet {
     const uint8_t *data;
     size_t size;
+    /* Tags are V4L2 timestamps in microseconds and identify the input frame. */
     uint64_t tag;
     uint32_t flags;
 };
@@ -52,6 +54,7 @@ struct venus_v4l2_packet {
 typedef int (*venus_v4l2_packet_callback)(
     const struct venus_v4l2_packet *packet, void *opaque);
 
+/* Open the stateful encoder and configure its raw and coded queues. */
 int venus_v4l2_encoder_open(
     const struct venus_v4l2_encoder_config *config,
     struct venus_v4l2_encoder **encoder,
@@ -72,6 +75,7 @@ int venus_v4l2_encoder_submit_dmabuf(
     size_t dma_size, uint32_t stride, uint32_t scanlines,
     size_t uv_offset, uint64_t tag,
     venus_v4l2_packet_callback callback, void *opaque);
+/* Copy a visible NV12 frame into the encoder's aligned layout. */
 int venus_v4l2_encoder_pack_nv12(
     uint8_t *destination, size_t destination_size,
     uint32_t destination_stride, uint32_t destination_scanlines,

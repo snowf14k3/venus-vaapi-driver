@@ -3,6 +3,11 @@
 
 #include <stdlib.h>
 
+/*
+ * Keep the unused VA entry points explicit.  libva expects a complete vtable,
+ * while this driver only overrides the object, decode, and encode operations
+ * that are implemented for the Raphael backend.
+ */
 static VAStatus unsupported(void)
 {
     return VA_STATUS_ERROR_UNIMPLEMENTED;

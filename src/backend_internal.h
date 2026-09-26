@@ -27,12 +27,18 @@
 #define VENUS_BUFFER_BASE 0x04000000u
 #define VENUS_IMAGE_BASE 0x05000000u
 
+/*
+ * These limits are the VA-facing contract used by the Raphael/SM8150 path.
+ * Keep them separate from the V4L2 formats: the kernel may report aligned
+ * coded dimensions while the VA client still owns the visible dimensions.
+ */
 #define VENUS_MIN_WIDTH 48u
 #define VENUS_MIN_HEIGHT 32u
 #define VENUS_MAX_WIDTH 4096u
 #define VENUS_MAX_HEIGHT 4096u
 #define VENUS_H264_MAX_MACROBLOCKS 36864u
 #define VENUS_H264_MAX_MACROBLOCKS_PER_SECOND 1036800u
+/* The encoder needs complete per-frame headers to preserve access-unit order. */
 #define VENUS_H264_PACKED_HEADERS \
     (VA_ENC_PACKED_HEADER_SEQUENCE | VA_ENC_PACKED_HEADER_PICTURE | \
      VA_ENC_PACKED_HEADER_SLICE | VA_ENC_PACKED_HEADER_RAW_DATA)
@@ -81,10 +87,6 @@ struct venus_buffer {
     bool coded_ready;
     bool coded_delivered;
     bool input_done;
-    bool input_sample_valid;
-    uint8_t input_sample_min;
-    uint8_t input_sample_max;
-    uint32_t input_sample_bright;
     size_t coded_size;
     unsigned int coded_packets;
     uint64_t coded_sequence;
@@ -131,7 +133,6 @@ struct venus_context {
 struct venus_backend {
     pthread_mutex_t mutex;
     struct venus_capabilities capabilities;
-    bool debug;
     struct venus_config configs[VENUS_MAX_CONFIGS];
     struct venus_context contexts[VENUS_MAX_CONTEXTS];
     struct venus_surface surfaces[VENUS_MAX_SURFACES];
@@ -140,8 +141,6 @@ struct venus_backend {
 };
 
 struct venus_backend *venus_backend_from_context(VADriverContextP context);
-void venus_backend_log(const struct venus_backend *backend,
-                       const char *format, ...);
 VAStatus venus_backend_status_from_errno(int status);
 bool venus_backend_h264_profile(VAProfile profile);
 bool venus_backend_h264_vld_supported(const struct venus_backend *backend,
