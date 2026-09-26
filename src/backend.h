@@ -2,7 +2,7 @@
 #ifndef VENUS_BACKEND_H
 #define VENUS_BACKEND_H
 
-#include "venus/capabilities.h"
+#include "capabilities.h"
 
 #include <va/va_backend.h>
 

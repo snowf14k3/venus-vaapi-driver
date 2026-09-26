@@ -2,7 +2,7 @@
 #ifndef VENUS_BACKEND_INTERNAL_H
 #define VENUS_BACKEND_INTERNAL_H
 
-#include "venus/capabilities.h"
+#include "capabilities.h"
 #include "v4l2_decoder.h"
 #include "v4l2_encoder.h"
 

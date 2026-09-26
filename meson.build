@@ -21,7 +21,7 @@ add_project_arguments(
   language: 'c',
 )
 
-project_inc = include_directories('include', 'src')
+project_inc = include_directories('src')
 
 common_sources = files(
   'src/capabilities.c',
@@ -33,8 +33,7 @@ codec_sources = files(
   'src/h264_annexb.c',
 )
 
-stateful_sources = files(
-  'src/annexb_split.c',
+decoder_sources = files(
   'src/v4l2_decoder.c',
 )
 
@@ -42,7 +41,7 @@ encoder_sources = files(
   'src/v4l2_encoder.c',
 )
 
-driver_sources = common_sources + codec_sources + stateful_sources + encoder_sources + files(
+driver_sources = common_sources + codec_sources + decoder_sources + encoder_sources + files(
   'src/backend.c',
   'src/decode.c',
   'src/encode.c',
@@ -60,30 +59,6 @@ venus_driver = shared_module(
   gnu_symbol_visibility: 'hidden',
   install: true,
   install_dir: join_paths(get_option('libdir'), 'dri'),
-)
-
-executable(
-  'venus-vaapi-info',
-  common_sources + files('tools/venus-vaapi-info.c'),
-  include_directories: project_inc,
-  dependencies: [threads_dep],
-  install: true,
-)
-
-executable(
-  'venus-v4l2-decode',
-  common_sources + stateful_sources + files('tools/venus-v4l2-decode.c'),
-  include_directories: project_inc,
-  dependencies: [threads_dep],
-  install: false,
-)
-
-executable(
-  'venus-v4l2-encode',
-  common_sources + encoder_sources + files('tools/venus-v4l2-encode.c'),
-  include_directories: project_inc,
-  dependencies: [threads_dep],
-  install: false,
 )
 
 summary(

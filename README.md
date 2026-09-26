@@ -20,10 +20,9 @@ context to 1088 coded lines; clients should present the visible height.
 On Debian 13:
 
 ```bash
-sudo apt install build-essential meson ninja-build pkg-config libva-dev libdrm-dev libudev-dev vainfo
+sudo apt install build-essential meson ninja-build pkg-config libva-dev libdrm-dev vainfo
 ./scripts/install.sh
 LIBVA_DRIVER_NAME=venus vainfo --display drm --device /dev/dri/renderD128
 ```
 
-See [usage](docs/usage.md) for FFmpeg commands and [architecture](docs/architecture.md)
-for implementation details. Licensed under MIT.
+Licensed under MIT.
