@@ -504,12 +504,7 @@ static VAStatus backend_query_config_attributes(
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_SUCCESS;
     }
-    if (*num_attributes < required) {
-        *num_attributes = required;
-        pthread_mutex_unlock(&backend->mutex);
-        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
-    }
-
+    /* VA-API returns the count here; callers need not initialize it. */
     attributes[0] = (VAConfigAttrib) {
         .type = VAConfigAttribRTFormat,
         .value = VA_RT_FORMAT_YUV420,
