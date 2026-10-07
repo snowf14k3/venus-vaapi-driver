@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <time.h>
+#include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 #include <poll.h>
 #include <stdbool.h>
@@ -34,6 +35,8 @@ struct venus_v4l2_decoder {
     unsigned int source_changes;
     uint32_t requested_width;
     uint32_t requested_height;
+    uint32_t requested_raw_format;
+    uint32_t coded_format;
     unsigned int requested_capture_buffers;
     char last_operation[64];
 };
@@ -104,14 +107,14 @@ static int set_capture_format(struct venus_v4l2_decoder *decoder)
     if (format.fmt.pix_mp.height == 0)
         format.fmt.pix_mp.height = decoder->requested_height;
 
-    format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+    format.fmt.pix_mp.pixelformat = decoder->requested_raw_format;
     format.fmt.pix_mp.field = V4L2_FIELD_NONE;
     format.fmt.pix_mp.num_planes = 1;
 
     if (xioctl(decoder->fd, VIDIOC_S_FMT, &format) < 0)
         return decoder_error(decoder, "VIDIOC_S_FMT(CAPTURE)");
 
-    if (format.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12 ||
+    if (format.fmt.pix_mp.pixelformat != decoder->requested_raw_format ||
         format.fmt.pix_mp.num_planes != 1 ||
         format.fmt.pix_mp.plane_fmt[0].sizeimage == 0) {
         errno = EINVAL;
@@ -344,6 +347,10 @@ int venus_v4l2_decoder_open(
         *result = NULL;
 
     if (!config || !result || !config->device ||
+        (config->raw_format != V4L2_PIX_FMT_NV12 &&
+         config->raw_format != V4L2_PIX_FMT_P010) ||
+        (config->raw_format == V4L2_PIX_FMT_P010 &&
+         config->coded_format != V4L2_PIX_FMT_HEVC) ||
         config->width == 0 || config->height == 0 ||
         config->output_buffer_size == 0 ||
         config->output_buffer_size > UINT32_MAX ||
@@ -357,6 +364,8 @@ int venus_v4l2_decoder_open(
     decoder->fd = -1;
     decoder->requested_width = config->width;
     decoder->requested_height = config->height;
+    decoder->requested_raw_format = config->raw_format;
+    decoder->coded_format = config->coded_format;
     decoder->requested_capture_buffers = config->capture_buffers;
 
     decoder->fd =
@@ -382,6 +391,24 @@ int venus_v4l2_decoder_open(
     status = set_output_format(decoder, config);
     if (status < 0)
         goto fail;
+
+    if (decoder->coded_format == V4L2_PIX_FMT_HEVC) {
+        struct v4l2_control delay = {
+            .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY,
+            .value = 0,
+        };
+
+        if (xioctl(decoder->fd, VIDIOC_S_CTRL, &delay) < 0) {
+            status = decoder_error(decoder, "S_CTRL(DISPLAY_DELAY)");
+            goto fail;
+        }
+        delay.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
+        delay.value = 1;
+        if (xioctl(decoder->fd, VIDIOC_S_CTRL, &delay) < 0) {
+            status = decoder_error(decoder, "S_CTRL(DISPLAY_DELAY_ENABLE)");
+            goto fail;
+        }
+    }
 
     status = request_and_map(
         decoder, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
@@ -460,15 +487,17 @@ static int dequeue_capture(struct venus_v4l2_decoder *decoder,
         }
 
         if (buffer.index >= decoder->capture_count ||
-            planes[0].bytesused > decoder->capture[buffer.index].length)
+            planes[0].bytesused > decoder->capture[buffer.index].length ||
+            planes[0].data_offset > planes[0].bytesused)
             return -EIO;
 
         decoder->capture[buffer.index].queued = false;
         *made_progress = true;
 
         frame = (struct venus_v4l2_frame) {
-            .data = decoder->capture[buffer.index].data,
-            .size = planes[0].bytesused,
+            .data = (const uint8_t *)decoder->capture[buffer.index].data +
+                    planes[0].data_offset,
+            .size = planes[0].bytesused - planes[0].data_offset,
             .tag = (uint64_t)buffer.timestamp.tv_sec * 1000000u +
                    (uint64_t)buffer.timestamp.tv_usec,
             .flags = buffer.flags,
@@ -534,7 +563,7 @@ static int dequeue_events(struct venus_v4l2_decoder *decoder,
                         "VIDIOC_G_FMT(CAPTURE source-change)");
 
                 if (format.fmt.pix_mp.pixelformat !=
-                        V4L2_PIX_FMT_NV12 ||
+                        decoder->requested_raw_format ||
                     format.fmt.pix_mp.num_planes != 1 ||
                     format.fmt.pix_mp.plane_fmt[0].sizeimage >
                         decoder->capture[0].length) {

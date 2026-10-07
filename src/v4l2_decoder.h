@@ -10,10 +10,11 @@
 
 struct venus_v4l2_decoder;
 
-/* Stateful decode uses coded OUTPUT and NV12 CAPTURE buffers. */
+/* Stateful decode uses coded OUTPUT and linear YUV CAPTURE buffers. */
 struct venus_v4l2_decoder_config {
     const char *device;
     uint32_t coded_format;
+    uint32_t raw_format;
     uint32_t width;
     uint32_t height;
     size_t output_buffer_size;

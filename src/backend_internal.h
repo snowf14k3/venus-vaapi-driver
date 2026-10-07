@@ -107,6 +107,8 @@ struct venus_image {
     size_t uv_offset;
 };
 
+struct venus_hevc_state;
+
 struct venus_context {
     bool used;
     VAContextID id;
@@ -117,6 +119,7 @@ struct venus_context {
     unsigned int encode_height;
     struct venus_backend *backend;
     struct venus_v4l2_decoder *decoder;
+    struct venus_hevc_state *hevc_state;
     struct venus_v4l2_encoder *encoder;
     bool encode_dmabuf;
     bool in_picture;
@@ -149,6 +152,9 @@ bool venus_backend_h264_vld_supported(const struct venus_backend *backend,
                                       VAProfile profile,
                                       VAEntrypoint entrypoint);
 bool venus_backend_h264_enc_supported(const struct venus_backend *backend,
+                                      VAProfile profile,
+                                      VAEntrypoint entrypoint);
+bool venus_backend_hevc_vld_supported(const struct venus_backend *backend,
                                       VAProfile profile,
                                       VAEntrypoint entrypoint);
 bool venus_backend_hevc_enc_supported(const struct venus_backend *backend,

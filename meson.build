@@ -1,11 +1,12 @@
 project(
   'venus-vaapi-driver',
-  'c',
+  'c', 'cpp',
   version: '0.12.0',
   license: 'MIT',
   meson_version: '>=1.2.0',
   default_options: [
     'c_std=c11',
+    'cpp_std=c++17',
     'warning_level=3',
     'werror=true',
   ],
@@ -31,6 +32,7 @@ common_sources = files(
 codec_sources = files(
   'src/bit_writer.c',
   'src/h264_annexb.c',
+  'src/hevc_annexb.cpp',
 )
 
 decoder_sources = files(

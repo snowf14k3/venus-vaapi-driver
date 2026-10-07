@@ -2,6 +2,7 @@
 #include "backend_internal.h"
 
 #include "h264_annexb.h"
+#include "hevc_annexb.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -56,6 +57,7 @@ int venus_decode_store_frame_locked(
     struct venus_backend *backend = opaque;
     struct venus_surface *surface;
     uint32_t stride;
+    uint32_t row_bytes;
     size_t source_uv_offset;
     int status;
 
@@ -63,6 +65,8 @@ int venus_decode_store_frame_locked(
         frame->width == 0 || frame->height == 0 ||
         (frame->width & 1u) || (frame->height & 1u))
         return -EINVAL;
+    if (frame->flags & V4L2_BUF_FLAG_ERROR)
+        return -EIO;
 
     surface = venus_backend_find_surface(
         backend, (VASurfaceID)frame->tag);
@@ -72,10 +76,15 @@ int venus_decode_store_frame_locked(
         surface->height > frame->height)
         return -EINVAL;
 
+    if (surface->fourcc != VA_FOURCC_NV12 &&
+        surface->fourcc != VA_FOURCC_P010)
+        return -ENOTSUP;
+    row_bytes = frame->width *
+                (surface->fourcc == VA_FOURCC_P010 ? 2u : 1u);
     stride = frame->bytes_per_line
                  ? frame->bytes_per_line
-                 : frame->width;
-    if (stride < frame->width ||
+                 : row_bytes;
+    if (stride < row_bytes ||
         stride > SIZE_MAX / frame->height)
         return -EINVAL;
     source_uv_offset = (size_t)stride * frame->height;
@@ -157,10 +166,18 @@ static VAStatus backend_create_context(
                     ? V4L2_PIX_FMT_VP8
                     : config->profile == VAProfileVP9Profile0
                           ? V4L2_PIX_FMT_VP9
+                    : config->profile == VAProfileHEVCMain ||
+                      config->profile == VAProfileHEVCMain10
+                          ? V4L2_PIX_FMT_HEVC
                           : V4L2_PIX_FMT_H264,
+            .raw_format = config->profile == VAProfileHEVCMain10
+                              ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12,
             .width = (uint32_t)picture_width,
             .height = (uint32_t)picture_height,
-            .output_buffer_size = 2u * 1024u * 1024u,
+            .output_buffer_size = config->profile == VAProfileHEVCMain ||
+                                          config->profile == VAProfileHEVCMain10
+                                      ? 8u * 1024u * 1024u
+                                      : 2u * 1024u * 1024u,
             .output_buffers = 4,
             .capture_buffers = 16,
         };
@@ -207,6 +224,7 @@ static void destroy_context_locked(struct venus_backend *backend,
         return;
 
     venus_v4l2_decoder_close(context->decoder);
+    venus_hevc_state_free(context->hevc_state);
     venus_encode_close_context(context);
     clear_pending(context);
     destroy_context_buffers(backend, context->id);
@@ -430,6 +448,90 @@ static int collect_h264_buffers(
     return 0;
 }
 
+static int collect_hevc_buffers(
+    struct venus_backend *backend, struct venus_context *context,
+    const VAPictureParameterBufferHEVC **picture,
+    const VAIQMatrixBufferHEVC **iq_matrix,
+    struct venus_hevc_slice *slices, size_t *num_slices)
+{
+    const struct venus_buffer *slice_parameters = NULL;
+    size_t index;
+
+    *picture = NULL;
+    *iq_matrix = NULL;
+    *num_slices = 0;
+    for (index = 0; index < context->pending_count; index++) {
+        const struct venus_buffer *buffer = venus_backend_find_buffer(
+            backend, context->pending[index]);
+        size_t bytes;
+
+        if (!buffer || !buffer->num_elements ||
+            buffer->element_size > SIZE_MAX / buffer->num_elements)
+            return -EINVAL;
+        bytes = buffer->element_size * buffer->num_elements;
+        if (!buffer->data || !bytes)
+            return -EINVAL;
+
+        switch (buffer->type) {
+        case VAPictureParameterBufferType:
+            if (*picture || buffer->num_elements != 1 ||
+                buffer->element_size <
+                    sizeof(VAPictureParameterBufferHEVC))
+                return -EINVAL;
+            *picture =
+                (const VAPictureParameterBufferHEVC *)buffer->data;
+            break;
+        case VAIQMatrixBufferType:
+            if (*iq_matrix || buffer->num_elements != 1 ||
+                buffer->element_size < sizeof(VAIQMatrixBufferHEVC))
+                return -EINVAL;
+            *iq_matrix = (const VAIQMatrixBufferHEVC *)buffer->data;
+            break;
+        case VASliceParameterBufferType:
+            if (slice_parameters ||
+                buffer->element_size <
+                    sizeof(VASliceParameterBufferHEVC))
+                return -EINVAL;
+            slice_parameters = buffer;
+            break;
+        case VASliceDataBufferType:
+            if (!slice_parameters || buffer->num_elements != 1 ||
+                slice_parameters->num_elements >
+                    VENUS_MAX_SLICE_BATCHES - *num_slices)
+                return -EINVAL;
+            for (size_t slice = 0;
+                 slice < slice_parameters->num_elements; slice++) {
+                const VASliceParameterBufferHEVC *parameters =
+                    (const VASliceParameterBufferHEVC *)
+                    (slice_parameters->data +
+                     slice * slice_parameters->element_size);
+
+                if (parameters->slice_data_flag !=
+                        VA_SLICE_DATA_FLAG_ALL ||
+                    parameters->slice_data_offset > bytes ||
+                    parameters->slice_data_size >
+                        bytes - parameters->slice_data_offset ||
+                    !parameters->slice_data_size)
+                    return -EINVAL;
+                slices[*num_slices] = (struct venus_hevc_slice) {
+                    .parameters = parameters,
+                    .data = buffer->data +
+                            parameters->slice_data_offset,
+                    .size = parameters->slice_data_size,
+                };
+                (*num_slices)++;
+            }
+            slice_parameters = NULL;
+            break;
+        default:
+            return -ENOTSUP;
+        }
+    }
+
+    return *picture && *num_slices && !slice_parameters
+               ? 0 : -EINVAL;
+}
+
 static int collect_vpx_frame(
     struct venus_backend *backend, struct venus_context *context,
     VAProfile profile, const uint8_t **data, size_t *size,
@@ -573,7 +675,11 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
                                     VAContextID context_id)
 {
     struct venus_h264_slice_batch batches[VENUS_MAX_SLICE_BATCHES];
+    struct venus_hevc_slice hevc_slices[VENUS_MAX_SLICE_BATCHES];
     const VAPictureParameterBufferH264 *picture;
+    const VAPictureParameterBufferHEVC *hevc_picture;
+    const VAIQMatrixBufferHEVC *hevc_iq;
+    struct venus_hevc_state *next_hevc_state = NULL;
     struct venus_backend *backend =
         venus_backend_from_context(driver_context);
     struct venus_context *context;
@@ -582,6 +688,7 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
     size_t access_unit_capacity;
     size_t access_unit_size = 0;
     size_t num_batches;
+    size_t num_hevc_slices;
     int status;
 
     if (!backend)
@@ -628,6 +735,27 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
         status = venus_v4l2_decoder_submit(
             context->decoder, frame, access_unit_size,
             context->target, venus_decode_store_frame_locked, backend);
+    } else if (config->profile == VAProfileHEVCMain ||
+               config->profile == VAProfileHEVCMain10) {
+        status = collect_hevc_buffers(
+            backend, context, &hevc_picture, &hevc_iq,
+            hevc_slices, &num_hevc_slices);
+        if (status < 0)
+            goto finish;
+        status = venus_hevc_build_access_unit(
+            config->profile, hevc_picture, hevc_iq,
+            hevc_slices, num_hevc_slices, context->hevc_state,
+            &next_hevc_state, &access_unit, &access_unit_size);
+        if (status < 0)
+            goto finish;
+        status = venus_v4l2_decoder_submit(
+            context->decoder, access_unit, access_unit_size,
+            context->target, venus_decode_store_frame_locked, backend);
+        if (status == 0) {
+            venus_hevc_state_free(context->hevc_state);
+            context->hevc_state = next_hevc_state;
+            next_hevc_state = NULL;
+        }
     } else {
         status = collect_h264_buffers(
             backend, context, &picture, batches, &num_batches,
@@ -654,6 +782,7 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
 
 finish:
     free(access_unit);
+    venus_hevc_state_free(next_hevc_state);
     clear_pending(context);
     context->in_picture = false;
     context->target = VA_INVALID_ID;

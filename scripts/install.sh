@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-for command in meson ninja pkg-config cc; do
+for command in meson ninja pkg-config cc c++; do
     command -v "${command}" >/dev/null 2>&1 || {
         echo "Missing command: ${command}" >&2
         exit 1

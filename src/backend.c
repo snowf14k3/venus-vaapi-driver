@@ -77,6 +77,28 @@ bool venus_backend_h264_enc_supported(const struct venus_backend *backend,
                                   VENUS_CODEC_H264);
 }
 
+bool venus_backend_hevc_vld_supported(const struct venus_backend *backend,
+                                      VAProfile profile,
+                                      VAEntrypoint entrypoint)
+{
+    const char *enabled =
+        getenv("VENUS_VAAPI_EXPERIMENTAL_HEVC_DECODE");
+
+    if (!backend || entrypoint != VAEntrypointVLD ||
+        (profile != VAProfileHEVCMain &&
+         profile != VAProfileHEVCMain10) ||
+        !enabled || strcmp(enabled, "1") != 0)
+        return false;
+
+    /* Main10 CAPTURE may become P010 only after the source-change event. */
+    return venus_capabilities_has(&backend->capabilities,
+                                  VENUS_ROLE_DECODER,
+                                  VENUS_CODEC_HEVC) &&
+           venus_capabilities_has_raw(&backend->capabilities,
+                                      VENUS_ROLE_DECODER,
+                                      VENUS_RAW_NV12);
+}
+
 bool venus_backend_hevc_enc_supported(const struct venus_backend *backend,
                                       VAProfile profile,
                                       VAEntrypoint entrypoint)
@@ -251,13 +273,17 @@ static VAStatus backend_query_profiles(VADriverContextP context,
         *num_profiles = 0;
     }
     if (venus_backend_hevc_enc_supported(
-            backend, VAProfileHEVCMain, VAEntrypointEncSlice)) {
+            backend, VAProfileHEVCMain, VAEntrypointEncSlice) ||
+        venus_backend_hevc_vld_supported(
+            backend, VAProfileHEVCMain, VAEntrypointVLD)) {
         if (profiles)
             profiles[*num_profiles] = VAProfileHEVCMain;
         (*num_profiles)++;
     }
     if (venus_backend_hevc_enc_supported(
-            backend, VAProfileHEVCMain10, VAEntrypointEncSlice)) {
+            backend, VAProfileHEVCMain10, VAEntrypointEncSlice) ||
+        venus_backend_hevc_vld_supported(
+            backend, VAProfileHEVCMain10, VAEntrypointVLD)) {
         if (profiles)
             profiles[*num_profiles] = VAProfileHEVCMain10;
         (*num_profiles)++;
@@ -324,6 +350,8 @@ static VAStatus backend_query_entrypoints(VADriverContextP context,
         (*num_entrypoints)++;
     }
     if (venus_backend_vpx_vld_supported(
+            backend, profile, VAEntrypointVLD) ||
+        venus_backend_hevc_vld_supported(
             backend, profile, VAEntrypointVLD)) {
         if (entrypoints)
             entrypoints[*num_entrypoints] = VAEntrypointVLD;
@@ -356,6 +384,8 @@ static VAStatus backend_get_config_attributes(
         !venus_backend_h264_enc_supported(
             backend, profile, entrypoint) &&
         !venus_backend_hevc_enc_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_hevc_vld_supported(
             backend, profile, entrypoint) &&
         !venus_backend_vpx_vld_supported(
             backend, profile, entrypoint) &&
@@ -446,6 +476,8 @@ static VAStatus backend_create_config(
         !venus_backend_h264_enc_supported(
             backend, profile, entrypoint) &&
         !venus_backend_hevc_enc_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_hevc_vld_supported(
             backend, profile, entrypoint) &&
         !venus_backend_vpx_vld_supported(
             backend, profile, entrypoint) &&
