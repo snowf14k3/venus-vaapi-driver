@@ -81,11 +81,50 @@ bool venus_backend_hevc_enc_supported(const struct venus_backend *backend,
                                       VAProfile profile,
                                       VAEntrypoint entrypoint)
 {
-    return backend && profile == VAProfileHEVCMain &&
+    enum venus_raw_format raw;
+
+    if (!backend || entrypoint != VAEntrypointEncSlice)
+        return false;
+    raw = profile == VAProfileHEVCMain10 ? VENUS_RAW_P010
+          : profile == VAProfileHEVCMain ? VENUS_RAW_NV12 : 0;
+    return raw &&
+           venus_capabilities_has(&backend->capabilities,
+                                  VENUS_ROLE_ENCODER,
+                                  VENUS_CODEC_HEVC) &&
+           venus_capabilities_has_raw(&backend->capabilities,
+                                      VENUS_ROLE_ENCODER, raw);
+}
+
+bool venus_backend_vpx_vld_supported(const struct venus_backend *backend,
+                                     VAProfile profile,
+                                     VAEntrypoint entrypoint)
+{
+    enum venus_codec codec;
+
+    if (!backend || entrypoint != VAEntrypointVLD)
+        return false;
+    codec = profile == VAProfileVP8Version0_3 ? VENUS_CODEC_VP8
+            : profile == VAProfileVP9Profile0 ? VENUS_CODEC_VP9 : 0;
+    return codec &&
+           venus_capabilities_has(&backend->capabilities,
+                                  VENUS_ROLE_DECODER, codec) &&
+           venus_capabilities_has_raw(&backend->capabilities,
+                                      VENUS_ROLE_DECODER,
+                                      VENUS_RAW_NV12);
+}
+
+bool venus_backend_vp8_enc_supported(const struct venus_backend *backend,
+                                     VAProfile profile,
+                                     VAEntrypoint entrypoint)
+{
+    return backend && profile == VAProfileVP8Version0_3 &&
            entrypoint == VAEntrypointEncSlice &&
            venus_capabilities_has(&backend->capabilities,
                                   VENUS_ROLE_ENCODER,
-                                  VENUS_CODEC_HEVC);
+                                  VENUS_CODEC_VP8) &&
+           venus_capabilities_has_raw(&backend->capabilities,
+                                      VENUS_ROLE_ENCODER,
+                                      VENUS_RAW_NV12);
 }
 
 struct venus_config *venus_backend_find_config(struct venus_backend *backend,
@@ -211,10 +250,31 @@ static VAStatus backend_query_profiles(VADriverContextP context,
     } else {
         *num_profiles = 0;
     }
-    if (venus_capabilities_has(&backend->capabilities,
-                               VENUS_ROLE_ENCODER, VENUS_CODEC_HEVC)) {
+    if (venus_backend_hevc_enc_supported(
+            backend, VAProfileHEVCMain, VAEntrypointEncSlice)) {
         if (profiles)
             profiles[*num_profiles] = VAProfileHEVCMain;
+        (*num_profiles)++;
+    }
+    if (venus_backend_hevc_enc_supported(
+            backend, VAProfileHEVCMain10, VAEntrypointEncSlice)) {
+        if (profiles)
+            profiles[*num_profiles] = VAProfileHEVCMain10;
+        (*num_profiles)++;
+    }
+    if (venus_backend_vpx_vld_supported(
+            backend, VAProfileVP8Version0_3, VAEntrypointVLD) ||
+        venus_backend_vp8_enc_supported(
+            backend, VAProfileVP8Version0_3,
+            VAEntrypointEncSlice)) {
+        if (profiles)
+            profiles[*num_profiles] = VAProfileVP8Version0_3;
+        (*num_profiles)++;
+    }
+    if (venus_backend_vpx_vld_supported(
+            backend, VAProfileVP9Profile0, VAEntrypointVLD)) {
+        if (profiles)
+            profiles[*num_profiles] = VAProfileVP9Profile0;
         (*num_profiles)++;
     }
     pthread_mutex_unlock(&backend->mutex);
@@ -233,7 +293,10 @@ static VAStatus backend_query_entrypoints(VADriverContextP context,
 
     pthread_mutex_lock(&backend->mutex);
     if (!venus_backend_h264_profile(profile) &&
-        profile != VAProfileHEVCMain) {
+        profile != VAProfileHEVCMain &&
+        profile != VAProfileHEVCMain10 &&
+        profile != VAProfileVP8Version0_3 &&
+        profile != VAProfileVP9Profile0) {
         pthread_mutex_unlock(&backend->mutex);
         *num_entrypoints = 0;
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -253,9 +316,17 @@ static VAStatus backend_query_entrypoints(VADriverContextP context,
         (*num_entrypoints)++;
     }
     if (venus_backend_hevc_enc_supported(
+            backend, profile, VAEntrypointEncSlice) ||
+        venus_backend_vp8_enc_supported(
             backend, profile, VAEntrypointEncSlice)) {
         if (entrypoints)
             entrypoints[*num_entrypoints] = VAEntrypointEncSlice;
+        (*num_entrypoints)++;
+    }
+    if (venus_backend_vpx_vld_supported(
+            backend, profile, VAEntrypointVLD)) {
+        if (entrypoints)
+            entrypoints[*num_entrypoints] = VAEntrypointVLD;
         (*num_entrypoints)++;
     }
     if (*num_entrypoints == 0) {
@@ -285,6 +356,10 @@ static VAStatus backend_get_config_attributes(
         !venus_backend_h264_enc_supported(
             backend, profile, entrypoint) &&
         !venus_backend_hevc_enc_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_vpx_vld_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_vp8_enc_supported(
             backend, profile, entrypoint)) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -293,7 +368,10 @@ static VAStatus backend_get_config_attributes(
     for (index = 0; index < num_attributes; index++) {
         switch (attributes[index].type) {
         case VAConfigAttribRTFormat:
-            attributes[index].value = VA_RT_FORMAT_YUV420;
+            attributes[index].value =
+                profile == VAProfileHEVCMain10
+                    ? VA_RT_FORMAT_YUV420_10
+                    : VA_RT_FORMAT_YUV420;
             break;
         case VAConfigAttribDecSliceMode:
             attributes[index].value =
@@ -303,21 +381,25 @@ static VAStatus backend_get_config_attributes(
             break;
         case VAConfigAttribRateControl:
             attributes[index].value =
-                entrypoint == VAEntrypointEncSlice
-                    ? VA_RC_VBR | VA_RC_CBR | VA_RC_CQP
-                    : VA_ATTRIB_NOT_SUPPORTED;
+                entrypoint != VAEntrypointEncSlice
+                    ? VA_ATTRIB_NOT_SUPPORTED
+                    : profile == VAProfileVP8Version0_3
+                          ? VA_RC_VBR | VA_RC_CBR
+                          : VA_RC_VBR | VA_RC_CBR | VA_RC_CQP;
             break;
         case VAConfigAttribEncPackedHeaders:
             attributes[index].value =
-                entrypoint == VAEntrypointEncSlice
-                    ? VENUS_H264_PACKED_HEADERS
-                    : VA_ATTRIB_NOT_SUPPORTED;
+                entrypoint != VAEntrypointEncSlice
+                    ? VA_ATTRIB_NOT_SUPPORTED
+                    : profile == VAProfileVP8Version0_3
+                          ? 0
+                          : VENUS_H264_PACKED_HEADERS;
             break;
         case VAConfigAttribEncMaxRefFrames:
             attributes[index].value =
-                entrypoint == VAEntrypointEncSlice
-                    ? 1
-                    : VA_ATTRIB_NOT_SUPPORTED;
+                entrypoint != VAEntrypointEncSlice
+                    ? VA_ATTRIB_NOT_SUPPORTED
+                    : profile == VAProfileVP8Version0_3 ? 3 : 1;
             break;
         case VAConfigAttribEncMaxSlices:
             attributes[index].value =
@@ -364,6 +446,10 @@ static VAStatus backend_create_config(
         !venus_backend_h264_enc_supported(
             backend, profile, entrypoint) &&
         !venus_backend_hevc_enc_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_vpx_vld_supported(
+            backend, profile, entrypoint) &&
+        !venus_backend_vp8_enc_supported(
             backend, profile, entrypoint)) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
@@ -371,7 +457,10 @@ static VAStatus backend_create_config(
 
     for (attribute = 0; attribute < num_attributes; attribute++) {
         if (attributes[attribute].type == VAConfigAttribRTFormat &&
-            !(attributes[attribute].value & VA_RT_FORMAT_YUV420)) {
+            !(attributes[attribute].value &
+              (profile == VAProfileHEVCMain10
+                   ? VA_RT_FORMAT_YUV420_10
+                   : VA_RT_FORMAT_YUV420))) {
             pthread_mutex_unlock(&backend->mutex);
             return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
         }
@@ -385,7 +474,8 @@ static VAStatus backend_create_config(
             attributes[attribute].type == VAConfigAttribRateControl) {
             if (attributes[attribute].value != VA_RC_VBR &&
                 attributes[attribute].value != VA_RC_CBR &&
-                attributes[attribute].value != VA_RC_CQP) {
+                (attributes[attribute].value != VA_RC_CQP ||
+                 profile == VAProfileVP8Version0_3)) {
                 pthread_mutex_unlock(&backend->mutex);
                 return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
             }
@@ -395,7 +485,8 @@ static VAStatus backend_create_config(
             attributes[attribute].type ==
                 VAConfigAttribEncPackedHeaders) {
             if (attributes[attribute].value &
-                ~VENUS_H264_PACKED_HEADERS) {
+                ~(profile == VAProfileVP8Version0_3
+                      ? 0u : VENUS_H264_PACKED_HEADERS)) {
                 pthread_mutex_unlock(&backend->mutex);
                 return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
             }
@@ -486,7 +577,9 @@ static VAStatus backend_query_config_attributes(
     /* VA-API returns the count here; callers need not initialize it. */
     attributes[0] = (VAConfigAttrib) {
         .type = VAConfigAttribRTFormat,
-        .value = VA_RT_FORMAT_YUV420,
+        .value = config->profile == VAProfileHEVCMain10
+                     ? VA_RT_FORMAT_YUV420_10
+                     : VA_RT_FORMAT_YUV420,
     };
     if (required == 3) {
         attributes[1] = (VAConfigAttrib) {

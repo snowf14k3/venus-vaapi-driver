@@ -59,6 +59,39 @@ bool venus_capabilities_add_fourcc(struct venus_capabilities *caps,
     return false;
 }
 
+bool venus_capabilities_add_raw_fourcc(struct venus_capabilities *caps,
+                                       enum venus_role role, uint32_t fourcc)
+{
+    uint32_t *formats;
+    uint32_t format;
+
+    if (!caps)
+        return false;
+
+    format = fourcc == V4L2_PIX_FMT_NV12 ? VENUS_RAW_NV12
+             : fourcc == V4L2_PIX_FMT_P010 ? VENUS_RAW_P010 : 0;
+    if (!format)
+        return false;
+
+    formats = role == VENUS_ROLE_DECODER ? &caps->decode_raw_formats
+                                         : &caps->encode_raw_formats;
+    *formats |= format;
+    return true;
+}
+
+bool venus_capabilities_has_raw(const struct venus_capabilities *caps,
+                                enum venus_role role,
+                                enum venus_raw_format format)
+{
+    uint32_t formats;
+
+    if (!caps)
+        return false;
+    formats = role == VENUS_ROLE_DECODER ? caps->decode_raw_formats
+                                         : caps->encode_raw_formats;
+    return (formats & format) != 0;
+}
+
 bool venus_capabilities_has(const struct venus_capabilities *caps,
                             enum venus_role role, enum venus_codec codec)
 {

@@ -17,6 +17,7 @@ typedef int (*venus_v4l2_output_done_callback)(uint64_t tag,
 struct venus_v4l2_encoder_config {
     const char *device;
     uint32_t coded_format;
+    uint32_t raw_format;
     uint32_t width;
     uint32_t height;
     uint32_t frames_per_second;
@@ -34,6 +35,8 @@ struct venus_v4l2_encoder_config {
     uint32_t h264_transform_8x8;
     uint32_t hevc_level;
     uint32_t hevc_tier;
+    uint32_t hevc_profile;
+    uint32_t vp8_profile;
     bool aud;
     bool output_dmabuf;
     size_t capture_buffer_size;

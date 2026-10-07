@@ -36,10 +36,10 @@ VAStatus venus_driver_init(VADriverContextP context)
     context->pDriverData = backend;
     context->version_major = VA_MAJOR_VERSION;
     context->version_minor = VA_MINOR_VERSION;
-    context->max_profiles = 4;
+    context->max_profiles = 7;
     context->max_entrypoints = 2;
     context->max_attributes = 8;
-    context->max_image_formats = 1;
+    context->max_image_formats = 2;
     context->max_subpic_formats = 1;
     context->max_display_attributes = 1;
     context->str_vendor = VENUS_VENDOR_STRING;

@@ -108,14 +108,14 @@ static int set_output_format(
 
     format.fmt.pix_mp.width = config->width;
     format.fmt.pix_mp.height = config->height;
-    format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+    format.fmt.pix_mp.pixelformat = config->raw_format;
     format.fmt.pix_mp.field = V4L2_FIELD_NONE;
     format.fmt.pix_mp.num_planes = 1;
 
     if (xioctl(encoder->fd, VIDIOC_S_FMT, &format) < 0)
         return encoder_error(encoder, "VIDIOC_S_FMT(OUTPUT)");
 
-    if (format.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12 ||
+    if (format.fmt.pix_mp.pixelformat != config->raw_format ||
         format.fmt.pix_mp.num_planes != 1 ||
         format.fmt.pix_mp.plane_fmt[0].sizeimage == 0) {
         errno = EINVAL;
@@ -215,19 +215,21 @@ static int set_parameters(
     if (xioctl(encoder->fd, VIDIOC_S_PARM, &parameters) < 0)
         return encoder_error(encoder, "VIDIOC_S_PARM(OUTPUT)");
 
-    status = set_control(
-        encoder, V4L2_CID_MPEG_VIDEO_HEADER_MODE,
-        V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
-        "S_CTRL(HEADER_MODE)");
-    if (status < 0)
-        return status;
+    if (config->coded_format != V4L2_PIX_FMT_VP8) {
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_HEADER_MODE,
+            V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME,
+            "S_CTRL(HEADER_MODE)");
+        if (status < 0)
+            return status;
 
-    status = set_control(
-        encoder, V4L2_CID_MPEG_VIDEO_AU_DELIMITER,
-        config->aud ? 1 : 0,
-        "S_CTRL(AU_DELIMITER)");
-    if (status < 0)
-        return status;
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_AU_DELIMITER,
+            config->aud ? 1 : 0,
+            "S_CTRL(AU_DELIMITER)");
+        if (status < 0)
+            return status;
+    }
 
     if (config->rate_control_enabled) {
         if (config->bitrate_mode !=
@@ -254,10 +256,35 @@ static int set_parameters(
     if (status < 0)
         return status;
 
+    if (config->coded_format == V4L2_PIX_FMT_VP8) {
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_VP8_PROFILE,
+            (int32_t)config->vp8_profile,
+            "S_CTRL(VP8_PROFILE)");
+        if (status < 0)
+            return status;
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_VPX_MIN_QP,
+            (int32_t)config->min_qp,
+            "S_CTRL(VPX_MIN_QP)");
+        if (status < 0)
+            return status;
+        status = set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_VPX_MAX_QP,
+            (int32_t)config->max_qp,
+            "S_CTRL(VPX_MAX_QP)");
+        if (status < 0)
+            return status;
+        return set_control(
+            encoder, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+            (int32_t)config->gop_size,
+            "S_CTRL(GOP_SIZE)");
+    }
+
     if (config->coded_format == V4L2_PIX_FMT_HEVC) {
         status = set_control(
             encoder, V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
-            V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+            (int32_t)config->hevc_profile,
             "S_CTRL(HEVC_PROFILE)");
         if (status < 0)
             return status;
@@ -556,7 +583,11 @@ int venus_v4l2_encoder_open(
 
     if (!config || !result || !config->device ||
         (config->coded_format != V4L2_PIX_FMT_H264 &&
-         config->coded_format != V4L2_PIX_FMT_HEVC) ||
+         config->coded_format != V4L2_PIX_FMT_HEVC &&
+         config->coded_format != V4L2_PIX_FMT_VP8) ||
+        (config->raw_format != V4L2_PIX_FMT_NV12 &&
+         !(config->coded_format == V4L2_PIX_FMT_HEVC &&
+           config->raw_format == V4L2_PIX_FMT_P010)) ||
         config->width == 0 || config->height == 0 ||
         config->frames_per_second == 0 ||
         config->gop_size == 0 ||
@@ -573,14 +604,21 @@ int venus_v4l2_encoder_open(
             config->bitrate == 0)
             return -EINVAL;
     }
-    if (config->i_qp < 1 ||
-        config->i_qp > 51 ||
-        config->p_qp < 1 ||
-        config->p_qp > 51 ||
-        config->min_qp < 1 ||
-        config->min_qp > 51 ||
-        config->max_qp < config->min_qp ||
-        config->max_qp > 51) {
+    {
+        uint32_t max_qp =
+            config->coded_format == V4L2_PIX_FMT_VP8 ? 128u :
+            config->coded_format == V4L2_PIX_FMT_HEVC ? 63u : 51u;
+
+        if (config->i_qp < 1 || config->i_qp > max_qp ||
+            config->p_qp < 1 || config->p_qp > max_qp ||
+            config->min_qp < 1 ||
+            config->max_qp < config->min_qp ||
+            config->max_qp > max_qp)
+            return -EINVAL;
+    }
+    if (config->raw_format == V4L2_PIX_FMT_P010 &&
+        config->hevc_profile !=
+            V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10) {
         return -EINVAL;
     }
 
@@ -728,6 +766,20 @@ static int dequeue_capture(struct venus_v4l2_encoder *encoder,
             .flags = buffer.flags,
         };
 
+        /* Venus wraps VP8 CAPTURE data in an IVF per-frame header. */
+        if (encoder->capture_format.pixelformat == V4L2_PIX_FMT_VP8 &&
+            packet.size >= 12) {
+            uint32_t frame_size = (uint32_t)packet.data[0] |
+                                  (uint32_t)packet.data[1] << 8 |
+                                  (uint32_t)packet.data[2] << 16 |
+                                  (uint32_t)packet.data[3] << 24;
+
+            if (frame_size == packet.size - 12) {
+                packet.data += 12;
+                packet.size = frame_size;
+            }
+        }
+
         if (packet.size > 0 && callback) {
             status = callback(&packet, opaque);
             if (status < 0)
@@ -808,25 +860,31 @@ static int find_free_output(struct venus_v4l2_encoder *encoder,
     }
 }
 
-static int pack_nv12_layout(
+static int pack_yuv420_layout(
     uint8_t *destination, size_t destination_size,
     uint32_t destination_stride, uint32_t destination_scanlines,
     const uint8_t *source, size_t source_size,
     uint32_t source_stride, uint32_t source_scanlines,
     size_t source_uv_offset, uint32_t width, uint32_t height,
-    size_t *packed_size)
+    unsigned int bytes_per_sample, size_t *packed_size)
 {
     size_t destination_uv_offset;
     size_t destination_chroma_scanlines;
     size_t source_required;
     size_t required;
+    uint32_t row_bytes;
     unsigned int row;
 
     if (!destination || !source || !packed_size ||
         !width || !height || (width & 1u) || (height & 1u) ||
-        destination_stride < width ||
+        (bytes_per_sample != 1 && bytes_per_sample != 2))
+        return -EINVAL;
+    if (width > UINT32_MAX / bytes_per_sample)
+        return -EOVERFLOW;
+    row_bytes = width * bytes_per_sample;
+    if (destination_stride < row_bytes ||
         destination_scanlines < height ||
-        source_stride < width || source_scanlines < height)
+        source_stride < row_bytes || source_scanlines < height)
         return -EINVAL;
     if (source_stride > SIZE_MAX / source_scanlines ||
         destination_stride > SIZE_MAX / destination_scanlines)
@@ -865,13 +923,13 @@ static int pack_nv12_layout(
         memcpy(destination +
                    (size_t)row * destination_stride,
                source + (size_t)row * source_stride,
-               width);
+               row_bytes);
     for (row = 0; row < height / 2u; row++)
         memcpy(destination + destination_uv_offset +
                    (size_t)row * destination_stride,
                source + source_uv_offset +
                    (size_t)row * source_stride,
-               width);
+               row_bytes);
 
     *packed_size = required;
     return 0;
@@ -891,11 +949,11 @@ int venus_v4l2_encoder_pack_nv12(
     if (pixels > SIZE_MAX - pixels / 2u)
         return -EOVERFLOW;
 
-    return pack_nv12_layout(
+    return pack_yuv420_layout(
         destination, destination_size,
         destination_stride, destination_scanlines,
         source, pixels + pixels / 2u,
-        width, height, pixels, width, height, packed_size);
+        width, height, pixels, width, height, 1u, packed_size);
 }
 
 int venus_v4l2_encoder_submit_strided(
@@ -915,6 +973,7 @@ int venus_v4l2_encoder_submit_strided(
     uint32_t stride;
     uint32_t scanlines;
     uint32_t output_size;
+    unsigned int bytes_per_sample;
     size_t packed_size;
     int index;
     int status;
@@ -925,15 +984,21 @@ int venus_v4l2_encoder_submit_strided(
         encoder->visible_height > UINT32_MAX - 31u)
         return -EINVAL;
 
-    stride = (encoder->visible_width + 127u) & ~127u;
+    bytes_per_sample =
+        encoder->output_format.pixelformat == V4L2_PIX_FMT_P010
+            ? 2u : 1u;
+    stride = ((encoder->visible_width + 127u) & ~127u) *
+             bytes_per_sample;
     scanlines = (encoder->visible_height + 31u) & ~31u;
     if (encoder->output_format.plane_fmt[0].bytesperline > stride) {
         uint32_t reported =
             encoder->output_format.plane_fmt[0].bytesperline;
+        uint32_t alignment = 128u * bytes_per_sample;
 
-        if (reported > UINT32_MAX - 127u)
+        if (reported > UINT32_MAX - alignment + 1u)
             return -EOVERFLOW;
-        stride = (reported + 127u) & ~127u;
+        stride = (reported + alignment - 1u) &
+                 ~(alignment - 1u);
     }
     output_size =
         encoder->output_format.plane_fmt[0].sizeimage;
@@ -948,13 +1013,14 @@ int venus_v4l2_encoder_submit_strided(
 
     memset(encoder->output[index].data, 0,
            encoder->output[index].length);
-    status = pack_nv12_layout(
+    status = pack_yuv420_layout(
         encoder->output[index].data,
         encoder->output[index].length,
         stride, scanlines,
         data, size, source_stride, source_scanlines,
         source_uv_offset, encoder->visible_width,
-        encoder->visible_height, &packed_size);
+        encoder->visible_height, bytes_per_sample,
+        &packed_size);
     if (status < 0)
         return status;
     if (packed_size > output_size)
@@ -1006,22 +1072,27 @@ int venus_v4l2_encoder_submit(struct venus_v4l2_encoder *encoder,
                               void *opaque)
 {
     size_t pixels;
+    unsigned int bytes_per_sample;
 
     if (!encoder || !data ||
         !encoder->visible_width || !encoder->visible_height ||
         encoder->visible_width > SIZE_MAX / encoder->visible_height)
         return -EINVAL;
+    bytes_per_sample =
+        encoder->output_format.pixelformat == V4L2_PIX_FMT_P010
+            ? 2u : 1u;
     pixels = (size_t)encoder->visible_width *
              encoder->visible_height;
-    if (pixels > SIZE_MAX - pixels / 2u)
+    if (pixels > SIZE_MAX / (3u * bytes_per_sample))
         return -EOVERFLOW;
-    if (size != pixels + pixels / 2u)
+    if (size != pixels * 3u / 2u * bytes_per_sample)
         return -EINVAL;
 
     return venus_v4l2_encoder_submit_strided(
         encoder, data, size,
-        encoder->visible_width, encoder->visible_height,
-        pixels, tag, callback, opaque);
+        encoder->visible_width * bytes_per_sample,
+        encoder->visible_height,
+        pixels * bytes_per_sample, tag, callback, opaque);
 }
 
 int venus_v4l2_encoder_submit_dmabuf(
@@ -1046,7 +1117,9 @@ int venus_v4l2_encoder_submit_dmabuf(
 
     if (!encoder || encoder->output_memory != V4L2_MEMORY_DMABUF ||
         dma_fd < 0 || dma_size == 0 || dma_size > UINT32_MAX ||
-        stride < encoder->visible_width ||
+        stride < encoder->visible_width *
+                     (encoder->output_format.pixelformat ==
+                              V4L2_PIX_FMT_P010 ? 2u : 1u) ||
         scanlines < encoder->visible_height ||
         uv_offset != (size_t)stride * scanlines)
         return -EINVAL;

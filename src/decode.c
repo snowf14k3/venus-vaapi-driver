@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <va/va_dec_vp8.h>
+#include <va/va_dec_vp9.h>
 
 #define VENUS_MAX_SLICE_BATCHES 64
 #define VENUS_ACCESS_UNIT_OVERHEAD 4096u
@@ -78,7 +80,7 @@ int venus_decode_store_frame_locked(
         return -EINVAL;
     source_uv_offset = (size_t)stride * frame->height;
 
-    status = venus_surface_copy_from_nv12(
+    status = venus_surface_copy_from_yuv420(
         surface, frame->data, frame->size, stride,
         source_uv_offset, surface->width, surface->height);
     if (status < 0)
@@ -124,9 +126,13 @@ static VAStatus backend_create_context(
     for (index = 0; index < (unsigned int)num_render_targets; index++) {
         struct venus_surface *surface =
             venus_backend_find_surface(backend, render_targets[index]);
+        uint32_t expected_fourcc =
+            config->profile == VAProfileHEVCMain10
+                ? VA_FOURCC_P010 : VA_FOURCC_NV12;
 
         if (!surface || surface->width != (unsigned int)picture_width ||
-            surface->height != (unsigned int)picture_height) {
+            surface->height != (unsigned int)picture_height ||
+            surface->fourcc != expected_fourcc) {
             pthread_mutex_unlock(&backend->mutex);
             return VA_STATUS_ERROR_INVALID_SURFACE;
         }
@@ -146,7 +152,12 @@ static VAStatus backend_create_context(
     if (config->entrypoint == VAEntrypointVLD) {
         decoder_config = (struct venus_v4l2_decoder_config) {
             .device = backend->capabilities.decoder_path,
-            .coded_format = V4L2_PIX_FMT_H264,
+            .coded_format =
+                config->profile == VAProfileVP8Version0_3
+                    ? V4L2_PIX_FMT_VP8
+                    : config->profile == VAProfileVP9Profile0
+                          ? V4L2_PIX_FMT_VP9
+                          : V4L2_PIX_FMT_H264,
             .width = (uint32_t)picture_width,
             .height = (uint32_t)picture_height,
             .output_buffer_size = 2u * 1024u * 1024u,
@@ -260,6 +271,9 @@ static VAStatus backend_begin_picture(VADriverContextP driver_context,
         return VA_STATUS_ERROR_INVALID_CONFIG;
     }
     if (!surface ||
+        surface->fourcc !=
+            (config->profile == VAProfileHEVCMain10
+                 ? VA_FOURCC_P010 : VA_FOURCC_NV12) ||
         (config->entrypoint == VAEntrypointVLD &&
          (surface->width != context->width ||
           surface->height != context->height)) ||
@@ -416,6 +430,145 @@ static int collect_h264_buffers(
     return 0;
 }
 
+static int collect_vpx_frame(
+    struct venus_backend *backend, struct venus_context *context,
+    VAProfile profile, const uint8_t **data, size_t *size,
+    uint8_t **owned_data)
+{
+    const VAPictureParameterBufferVP8 *vp8_picture = NULL;
+    const VADecPictureParameterBufferVP9 *vp9_picture = NULL;
+    const VASliceParameterBufferVP8 *vp8_slice = NULL;
+    const VASliceParameterBufferVP9 *vp9_slice = NULL;
+    size_t index;
+
+    *data = NULL;
+    *size = 0;
+    *owned_data = NULL;
+    for (index = 0; index < context->pending_count; index++) {
+        const struct venus_buffer *buffer = venus_backend_find_buffer(
+            backend, context->pending[index]);
+        size_t bytes;
+
+        if (!buffer || !buffer->num_elements ||
+            buffer->element_size > SIZE_MAX / buffer->num_elements)
+            return -EINVAL;
+        bytes = buffer->element_size * buffer->num_elements;
+        if (!buffer->data || !bytes)
+            return -EINVAL;
+
+        switch (buffer->type) {
+        case VAPictureParameterBufferType:
+            if (profile == VAProfileVP8Version0_3) {
+                if (vp8_picture || buffer->num_elements != 1 ||
+                    buffer->element_size < sizeof(*vp8_picture))
+                    return -EINVAL;
+                vp8_picture =
+                    (const VAPictureParameterBufferVP8 *)buffer->data;
+            } else {
+                if (vp9_picture || buffer->num_elements != 1 ||
+                    buffer->element_size < sizeof(*vp9_picture))
+                    return -EINVAL;
+                vp9_picture =
+                    (const VADecPictureParameterBufferVP9 *)buffer->data;
+            }
+            break;
+        case VASliceParameterBufferType:
+            if (profile == VAProfileVP8Version0_3) {
+                if (vp8_slice || buffer->num_elements != 1 ||
+                    buffer->element_size < sizeof(*vp8_slice))
+                    return -EINVAL;
+                vp8_slice =
+                    (const VASliceParameterBufferVP8 *)buffer->data;
+            } else {
+                if (vp9_slice || buffer->num_elements != 1 ||
+                    buffer->element_size < sizeof(*vp9_slice))
+                    return -EINVAL;
+                vp9_slice =
+                    (const VASliceParameterBufferVP9 *)buffer->data;
+            }
+            break;
+        case VASliceDataBufferType:
+            /* The stateful decoder needs the original frame header too. */
+            if (*data || buffer->num_elements != 1)
+                return -ENOTSUP;
+            *data = buffer->data;
+            *size = bytes;
+            break;
+        case VAIQMatrixBufferType:
+        case VAProbabilityBufferType:
+            break;
+        default:
+            return -ENOTSUP;
+        }
+    }
+
+    if (!*data || *size < 3)
+        return -EINVAL;
+    if (profile == VAProfileVP8Version0_3) {
+        if (!vp8_picture || vp8_picture->frame_width != context->width ||
+            vp8_picture->frame_height != context->height ||
+            (vp8_slice &&
+             (vp8_slice->slice_data_flag != VA_SLICE_DATA_FLAG_ALL ||
+              vp8_slice->slice_data_offset > *size ||
+              vp8_slice->slice_data_size >
+                  *size - vp8_slice->slice_data_offset)))
+            return -EINVAL;
+        if (!vp8_slice || !vp8_slice->slice_data_size)
+            return -EINVAL;
+        {
+            uint64_t first_partition =
+                ((uint64_t)vp8_slice->macroblock_offset + 7u) / 8u +
+                vp8_slice->partition_size[0];
+            size_t header_size =
+                vp8_picture->pic_fields.bits.key_frame ? 3u : 10u;
+            uint32_t tag;
+            uint8_t *frame;
+
+            if (!first_partition || first_partition > 0x7ffffu ||
+                vp8_slice->slice_data_size > SIZE_MAX - header_size)
+                return -EINVAL;
+            /* VA passes VP8 compressed partitions without the frame tag. */
+            frame = malloc(header_size + vp8_slice->slice_data_size);
+            if (!frame)
+                return -ENOMEM;
+            tag = ((uint32_t)first_partition << 5) |
+                  (1u << 4) |
+                  (vp8_picture->pic_fields.bits.version << 1) |
+                  vp8_picture->pic_fields.bits.key_frame;
+            frame[0] = (uint8_t)tag;
+            frame[1] = (uint8_t)(tag >> 8);
+            frame[2] = (uint8_t)(tag >> 16);
+            if (header_size == 10u) {
+                frame[3] = 0x9d;
+                frame[4] = 0x01;
+                frame[5] = 0x2a;
+                frame[6] = (uint8_t)vp8_picture->frame_width;
+                frame[7] = (uint8_t)(vp8_picture->frame_width >> 8);
+                frame[8] = (uint8_t)vp8_picture->frame_height;
+                frame[9] = (uint8_t)(vp8_picture->frame_height >> 8);
+            }
+            memcpy(frame + header_size,
+                   *data + vp8_slice->slice_data_offset,
+                   vp8_slice->slice_data_size);
+            *data = frame;
+            *size = header_size + vp8_slice->slice_data_size;
+            *owned_data = frame;
+        }
+    } else {
+        if (!vp9_picture || vp9_picture->frame_width != context->width ||
+            vp9_picture->frame_height != context->height ||
+            (vp9_slice &&
+             (vp9_slice->slice_data_flag != VA_SLICE_DATA_FLAG_ALL ||
+              vp9_slice->slice_data_offset > *size ||
+              vp9_slice->slice_data_size > *size)))
+            return -EINVAL;
+        if (((*data)[0] & 0xf0u) != 0x80u)
+            return -ENOTSUP;
+    }
+
+    return 0;
+}
+
 static VAStatus backend_end_picture(VADriverContextP driver_context,
                                     VAContextID context_id)
 {
@@ -462,27 +615,42 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
         goto finish;
     }
 
-    status = collect_h264_buffers(
-        backend, context, &picture, batches, &num_batches,
-        &access_unit_capacity);
-    if (status < 0)
-        goto finish;
+    if (config->profile == VAProfileVP8Version0_3 ||
+        config->profile == VAProfileVP9Profile0) {
+        const uint8_t *frame;
 
-    access_unit = malloc(access_unit_capacity);
-    if (!access_unit) {
-        status = -ENOMEM;
-        goto finish;
+        status = collect_vpx_frame(backend, context,
+                                   config->profile, &frame,
+                                   &access_unit_size,
+                                   &access_unit);
+        if (status < 0)
+            goto finish;
+        status = venus_v4l2_decoder_submit(
+            context->decoder, frame, access_unit_size,
+            context->target, venus_decode_store_frame_locked, backend);
+    } else {
+        status = collect_h264_buffers(
+            backend, context, &picture, batches, &num_batches,
+            &access_unit_capacity);
+        if (status < 0)
+            goto finish;
+
+        access_unit = malloc(access_unit_capacity);
+        if (!access_unit) {
+            status = -ENOMEM;
+            goto finish;
+        }
+
+        status = venus_h264_build_access_unit(
+            config->profile, picture, batches, num_batches,
+            access_unit, access_unit_capacity, &access_unit_size);
+        if (status < 0)
+            goto finish;
+
+        status = venus_v4l2_decoder_submit(
+            context->decoder, access_unit, access_unit_size,
+            context->target, venus_decode_store_frame_locked, backend);
     }
-
-    status = venus_h264_build_access_unit(
-        config->profile, picture, batches, num_batches,
-        access_unit, access_unit_capacity, &access_unit_size);
-    if (status < 0)
-        goto finish;
-
-    status = venus_v4l2_decoder_submit(
-        context->decoder, access_unit, access_unit_size,
-        context->target, venus_decode_store_frame_locked, backend);
 
 finish:
     free(access_unit);

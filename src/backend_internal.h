@@ -102,6 +102,7 @@ struct venus_image {
     VASurfaceID surface_id;
     unsigned int width;
     unsigned int height;
+    uint32_t fourcc;
     uint32_t stride;
     size_t uv_offset;
 };
@@ -126,6 +127,7 @@ struct venus_context {
     size_t encode_queue_head;
     size_t encode_queue_count;
     uint32_t encode_frames_per_second;
+    uint32_t encode_vp8_profile;
     uint64_t encode_sequence;
     uint64_t encode_delivery_sequence;
 };
@@ -152,6 +154,12 @@ bool venus_backend_h264_enc_supported(const struct venus_backend *backend,
 bool venus_backend_hevc_enc_supported(const struct venus_backend *backend,
                                       VAProfile profile,
                                       VAEntrypoint entrypoint);
+bool venus_backend_vpx_vld_supported(const struct venus_backend *backend,
+                                     VAProfile profile,
+                                     VAEntrypoint entrypoint);
+bool venus_backend_vp8_enc_supported(const struct venus_backend *backend,
+                                     VAProfile profile,
+                                     VAEntrypoint entrypoint);
 VAStatus venus_backend_encode_status_from_errno(int status);
 
 struct venus_config *venus_backend_find_config(struct venus_backend *backend,
@@ -174,12 +182,12 @@ int venus_surface_begin_cpu_rw(struct venus_surface *surface);
 int venus_surface_end_cpu_rw(struct venus_surface *surface);
 int venus_surface_wait_for_device_read(
     const struct venus_surface *surface);
-int venus_surface_copy_from_nv12(
+int venus_surface_copy_from_yuv420(
     struct venus_surface *surface, const uint8_t *source,
     size_t source_size, uint32_t source_stride,
     size_t source_uv_offset, unsigned int width,
     unsigned int height);
-int venus_surface_copy_to_nv12(
+int venus_surface_copy_to_yuv420(
     struct venus_surface *surface, uint8_t *destination,
     size_t destination_size, uint32_t destination_stride,
     size_t destination_uv_offset, unsigned int width,

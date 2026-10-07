@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 #include <va/va_enc_h264.h>
+#include <va/va_enc_vp8.h>
 
 #define VENUS_ENCODE_OUTPUT_BUFFERS 4u
 #define VENUS_ENCODE_CAPTURE_BUFFERS 16u
@@ -43,6 +44,13 @@ struct venus_hevc_encode_parameters {
     bool has_slice;
     bool intra;
     bool has_aud;
+};
+
+struct venus_vp8_encode_parameters {
+    const VAEncSequenceParameterBufferVP8 *sequence;
+    const VAEncPictureParameterBufferVP8 *picture;
+    uint32_t bitrate;
+    uint32_t frames_per_second;
 };
 
 static int64_t monotonic_milliseconds(void)
@@ -333,6 +341,60 @@ static int collect_hevc_parameters(
     if (parameters->picture->pic_fields.bits.idr_pic_flag &&
         !parameters->intra)
         return -ENOTSUP;
+    return 0;
+}
+
+static int collect_vp8_parameters(
+    struct venus_backend *backend, struct venus_context *context,
+    struct venus_vp8_encode_parameters *parameters)
+{
+    size_t index;
+
+    memset(parameters, 0, sizeof(*parameters));
+    for (index = 0; index < context->pending_count; index++) {
+        struct venus_buffer *buffer = venus_backend_find_buffer(
+            backend, context->pending[index]);
+        int status;
+
+        if (!buffer || buffer_bytes(buffer) == 0)
+            return -EINVAL;
+        switch (buffer->type) {
+        case VAEncSequenceParameterBufferType:
+            if (parameters->sequence || buffer->num_elements != 1 ||
+                buffer->element_size <
+                    sizeof(*parameters->sequence))
+                return -EINVAL;
+            parameters->sequence =
+                (const VAEncSequenceParameterBufferVP8 *)buffer->data;
+            break;
+        case VAEncPictureParameterBufferType:
+            if (parameters->picture || buffer->num_elements != 1 ||
+                buffer->element_size <
+                    sizeof(*parameters->picture))
+                return -EINVAL;
+            parameters->picture =
+                (const VAEncPictureParameterBufferVP8 *)buffer->data;
+            break;
+        case VAEncMiscParameterBufferType:
+            status = parse_misc_parameter(
+                buffer, &parameters->bitrate,
+                &parameters->frames_per_second);
+            if (status < 0)
+                return status;
+            break;
+        case VAQMatrixBufferType:
+            if (buffer->num_elements != 1 ||
+                buffer->element_size < sizeof(VAQMatrixBufferVP8))
+                return -EINVAL;
+            /* The stateful V4L2 encoder computes its own quantizer map. */
+            break;
+        default:
+            return -ENOTSUP;
+        }
+    }
+
+    if (!parameters->picture)
+        return -EINVAL;
     return 0;
 }
 
@@ -933,6 +995,7 @@ static int open_encoder(
     encoder_config = (struct venus_v4l2_encoder_config) {
         .device = backend->capabilities.encoder_path,
         .coded_format = V4L2_PIX_FMT_H264,
+        .raw_format = V4L2_PIX_FMT_NV12,
         .width = encode_width,
         .height = encode_height,
         .frames_per_second = frames_per_second,
@@ -1031,10 +1094,13 @@ static int open_hevc_encoder(
 
     if (!sequence || !picture || !parameters->intra ||
         !picture->pic_fields.bits.idr_pic_flag ||
-        sequence->general_profile_idc != 1 ||
+        sequence->general_profile_idc !=
+            (config->profile == VAProfileHEVCMain10 ? 2u : 1u) ||
         sequence->seq_fields.bits.chroma_format_idc != 1 ||
-        sequence->seq_fields.bits.bit_depth_luma_minus8 != 0 ||
-        sequence->seq_fields.bits.bit_depth_chroma_minus8 != 0 ||
+        sequence->seq_fields.bits.bit_depth_luma_minus8 !=
+            (config->profile == VAProfileHEVCMain10 ? 2u : 0u) ||
+        sequence->seq_fields.bits.bit_depth_chroma_minus8 !=
+            (config->profile == VAProfileHEVCMain10 ? 2u : 0u) ||
         sequence->seq_fields.bits.separate_colour_plane_flag ||
         sequence->seq_fields.bits.pcm_enabled_flag ||
         sequence->ip_period > 1 ||
@@ -1117,6 +1183,9 @@ static int open_hevc_encoder(
     encoder_config = (struct venus_v4l2_encoder_config) {
         .device = backend->capabilities.encoder_path,
         .coded_format = V4L2_PIX_FMT_HEVC,
+        .raw_format = config->profile == VAProfileHEVCMain10
+                          ? V4L2_PIX_FMT_P010
+                          : V4L2_PIX_FMT_NV12,
         .width = context->encode_width,
         .height = context->encode_height,
         .frames_per_second = frames_per_second,
@@ -1130,6 +1199,9 @@ static int open_hevc_encoder(
         .gop_size = gop_size,
         .hevc_level = level,
         .hevc_tier = sequence->general_tier_flag,
+        .hevc_profile = config->profile == VAProfileHEVCMain10
+                            ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10
+                            : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
         .aud = parameters->has_aud,
         .output_dmabuf = output_dmabuf,
         .capture_buffer_size = capture_size,
@@ -1148,16 +1220,116 @@ static int open_hevc_encoder(
     return 0;
 }
 
+static int open_vp8_encoder(
+    struct venus_backend *backend, struct venus_context *context,
+    const struct venus_vp8_encode_parameters *parameters,
+    bool output_dmabuf)
+{
+    const VAEncSequenceParameterBufferVP8 *sequence =
+        parameters->sequence;
+    const VAEncPictureParameterBufferVP8 *picture =
+        parameters->picture;
+    struct venus_v4l2_encoder_config encoder_config;
+    struct venus_v4l2_error error;
+    uint32_t bitrate;
+    uint32_t fps;
+    uint32_t gop;
+    uint32_t min_qp = 1;
+    uint32_t max_qp = 128;
+    size_t capture_size;
+    int status;
+
+    if (!sequence || !picture ||
+        sequence->frame_width != context->width ||
+        sequence->frame_height != context->height ||
+        sequence->frame_width_scale ||
+        sequence->frame_height_scale ||
+        picture->pic_flags.bits.version > 3 ||
+        picture->pic_flags.bits.segmentation_enabled ||
+        picture->pic_flags.bits.num_token_partitions)
+        return -ENOTSUP;
+
+    if (picture->clamp_qindex_high ||
+        picture->clamp_qindex_low) {
+        if (picture->clamp_qindex_high <
+            picture->clamp_qindex_low)
+            return -EINVAL;
+        min_qp = (uint32_t)picture->clamp_qindex_low + 1;
+        max_qp = (uint32_t)picture->clamp_qindex_high + 1;
+    }
+    bitrate = parameters->bitrate
+                  ? parameters->bitrate
+                  : sequence->bits_per_second;
+    if (!bitrate)
+        bitrate = VENUS_ENCODE_DEFAULT_BITRATE;
+    if (bitrate > INT_MAX)
+        return -ERANGE;
+    fps = parameters->frames_per_second
+              ? parameters->frames_per_second
+              : VENUS_ENCODE_DEFAULT_FPS;
+    gop = sequence->kf_max_dist
+              ? sequence->kf_max_dist
+              : sequence->intra_period;
+    if (!gop)
+        gop = 30;
+    if (environment_flag_enabled("VENUS_VAAPI_INTRA_ONLY"))
+        gop = 1;
+
+    status = venus_v4l2_encoder_compressed_size(
+        context->width, context->height, &capture_size);
+    if (status < 0)
+        return status;
+
+    encoder_config = (struct venus_v4l2_encoder_config) {
+        .device = backend->capabilities.encoder_path,
+        .coded_format = V4L2_PIX_FMT_VP8,
+        .raw_format = V4L2_PIX_FMT_NV12,
+        .width = context->width,
+        .height = context->height,
+        .frames_per_second = fps,
+        .bitrate = bitrate,
+        .rate_control_enabled = true,
+        .bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR,
+        .i_qp = 26,
+        .p_qp = 28,
+        .min_qp = min_qp,
+        .max_qp = max_qp,
+        .gop_size = gop,
+        .vp8_profile = picture->pic_flags.bits.version,
+        .output_dmabuf = output_dmabuf,
+        .capture_buffer_size = capture_size,
+        .output_buffers = VENUS_ENCODE_OUTPUT_BUFFERS,
+        .capture_buffers = VENUS_ENCODE_CAPTURE_BUFFERS,
+        .output_done = store_output_done,
+        .output_done_opaque = context,
+    };
+    status = venus_v4l2_encoder_open(
+        &encoder_config, &context->encoder, &error);
+    if (status < 0)
+        return status;
+    context->encode_width = context->width;
+    context->encode_height = context->height;
+    context->encode_frames_per_second = fps;
+    context->encode_vp8_profile =
+        picture->pic_flags.bits.version;
+    context->encode_dmabuf = output_dmabuf;
+    return 0;
+}
+
 VAStatus venus_encode_end_picture_locked(
     struct venus_backend *backend, struct venus_context *context,
     const struct venus_config *config)
 {
     struct venus_h264_encode_parameters parameters;
     struct venus_hevc_encode_parameters hevc_parameters;
+    struct venus_vp8_encode_parameters vp8_parameters;
     struct venus_buffer *coded;
     struct venus_surface *surface;
     VABufferID coded_buffer_id;
-    bool hevc = config->profile == VAProfileHEVCMain;
+    bool hevc = config->profile == VAProfileHEVCMain ||
+                config->profile == VAProfileHEVCMain10;
+    bool vp8 = config->profile == VAProfileVP8Version0_3;
+    bool keyframe_requested;
     size_t coded_capacity;
     uint64_t frame_tag;
     int status;
@@ -1165,12 +1337,16 @@ VAStatus venus_encode_end_picture_locked(
     status = hevc
                  ? collect_hevc_parameters(
                        backend, context, &hevc_parameters)
+             : vp8
+                 ? collect_vp8_parameters(
+                       backend, context, &vp8_parameters)
                  : collect_parameters(backend, context, &parameters);
     if (status < 0)
         return venus_backend_encode_status_from_errno(status);
 
     coded_buffer_id = hevc ? hevc_parameters.picture->coded_buf
-                           : parameters.picture->coded_buf;
+                      : vp8 ? vp8_parameters.picture->coded_buf
+                            : parameters.picture->coded_buf;
     coded = venus_backend_find_buffer(
         backend, coded_buffer_id);
     surface = venus_backend_find_surface(backend, context->target);
@@ -1193,9 +1369,12 @@ VAStatus venus_encode_end_picture_locked(
                      ? open_hevc_encoder(
                            backend, context, config,
                            &hevc_parameters, surface->dma_backed)
-                     : open_encoder(
-                           backend, context, config, &parameters,
-                           surface->dma_backed);
+                 : vp8 ? open_vp8_encoder(
+                             backend, context, &vp8_parameters,
+                             surface->dma_backed)
+                       : open_encoder(
+                             backend, context, config, &parameters,
+                             surface->dma_backed);
         if (status < 0)
             return venus_backend_encode_status_from_errno(status);
     } else if (hevc && hevc_parameters.sequence) {
@@ -1204,7 +1383,16 @@ VAStatus venus_encode_end_picture_locked(
             hevc_parameters.sequence->pic_height_in_luma_samples !=
                 context->encode_height)
             return VA_STATUS_ERROR_INVALID_PARAMETER;
-    } else if (!hevc && parameters.sequence) {
+    } else if (vp8) {
+        if (vp8_parameters.picture->pic_flags.bits.version !=
+                context->encode_vp8_profile ||
+            (vp8_parameters.sequence &&
+             (vp8_parameters.sequence->frame_width !=
+                  context->encode_width ||
+              vp8_parameters.sequence->frame_height !=
+                  context->encode_height)))
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+    } else if (parameters.sequence) {
         uint32_t width;
         uint32_t height;
 
@@ -1216,10 +1404,17 @@ VAStatus venus_encode_end_picture_locked(
             return VA_STATUS_ERROR_INVALID_PARAMETER;
     }
 
-    if (environment_flag_enabled("VENUS_VAAPI_INTRA_ONLY") ||
-        (context->encode_sequence > 0 &&
-         (hevc ? hevc_parameters.intra
-               : parameters.picture->pic_fields.bits.idr_pic_flag))) {
+    keyframe_requested = hevc
+                             ? hevc_parameters.intra
+                         : vp8 ? vp8_parameters.picture->
+                                     ref_flags.bits.force_kf ||
+                                 !vp8_parameters.picture->
+                                      pic_flags.bits.frame_type
+                               : parameters.picture->
+                                     pic_fields.bits.idr_pic_flag;
+    if (context->encode_sequence > 0 &&
+        (environment_flag_enabled("VENUS_VAAPI_INTRA_ONLY") ||
+         keyframe_requested)) {
         status = venus_v4l2_encoder_force_keyframe(context->encoder);
         if (status < 0) {
             return venus_backend_encode_status_from_errno(status);

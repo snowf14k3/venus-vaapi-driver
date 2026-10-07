@@ -53,10 +53,9 @@ static bool device_role(const struct v4l2_capability *cap,
     return false;
 }
 
-static void enumerate_codecs(int fd, enum venus_role role,
-                             struct venus_capabilities *caps)
+static void enumerate_formats(int fd, enum venus_role role,
+                              struct venus_capabilities *caps)
 {
-    /* OUTPUT carries coded data for decode and raw frames for encode. */
     struct v4l2_fmtdesc format = {
         .type = role == VENUS_ROLE_DECODER
                     ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
@@ -66,6 +65,14 @@ static void enumerate_codecs(int fd, enum venus_role role,
     for (format.index = 0; xioctl(fd, VIDIOC_ENUM_FMT, &format) == 0;
          format.index++)
         venus_capabilities_add_fourcc(caps, role, format.pixelformat);
+
+    format.type = role == VENUS_ROLE_DECODER
+                      ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+                      : V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    for (format.index = 0; xioctl(fd, VIDIOC_ENUM_FMT, &format) == 0;
+         format.index++)
+        venus_capabilities_add_raw_fourcc(caps, role,
+                                           format.pixelformat);
 }
 
 static void remember_path(struct venus_capabilities *caps,
@@ -116,7 +123,7 @@ int venus_v4l2_probe_prefix(struct venus_capabilities *caps,
             device_role(&capability, &role)) {
             found = true;
             remember_path(caps, role, path);
-            enumerate_codecs(fd, role, caps);
+            enumerate_formats(fd, role, caps);
         }
 
         close(fd);

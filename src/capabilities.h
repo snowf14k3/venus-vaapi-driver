@@ -23,9 +23,16 @@ enum venus_role {
     VENUS_ROLE_ENCODER,
 };
 
+enum venus_raw_format {
+    VENUS_RAW_NV12 = 1u << 0,
+    VENUS_RAW_P010 = 1u << 1,
+};
+
 struct venus_capabilities {
     uint32_t decode_codecs;
     uint32_t encode_codecs;
+    uint32_t decode_raw_formats;
+    uint32_t encode_raw_formats;
     char decoder_path[64];
     char encoder_path[64];
 };
@@ -33,6 +40,11 @@ struct venus_capabilities {
 void venus_capabilities_reset(struct venus_capabilities *caps);
 bool venus_capabilities_add_fourcc(struct venus_capabilities *caps,
                                    enum venus_role role, uint32_t fourcc);
+bool venus_capabilities_add_raw_fourcc(struct venus_capabilities *caps,
+                                       enum venus_role role, uint32_t fourcc);
+bool venus_capabilities_has_raw(const struct venus_capabilities *caps,
+                                enum venus_role role,
+                                enum venus_raw_format format);
 bool venus_capabilities_has(const struct venus_capabilities *caps,
                             enum venus_role role, enum venus_codec codec);
 const char *venus_codec_name(enum venus_codec codec);
