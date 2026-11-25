@@ -17,6 +17,8 @@
 #define VENUS_MAX_SLICE_BATCHES 64
 #define VENUS_ACCESS_UNIT_OVERHEAD 4096u
 #define VENUS_SYNC_TIMEOUT_MS 30000
+_Static_assert(VENUS_MAX_SURFACES <= 255u,
+               "VENUS_MAX_SURFACES must fit in 8-bit decode_tag slot");
 
 /*
  * VA decode collects picture and slice buffers during Begin/Render/EndPicture.
@@ -56,22 +58,26 @@ int venus_decode_store_frame_locked(
 {
     struct venus_backend *backend = opaque;
     struct venus_surface *surface;
+    VASurfaceID surface_id;
     uint32_t stride;
     uint32_t row_bytes;
     size_t source_uv_offset;
     int status;
 
-    if (!frame || frame->tag > UINT32_MAX ||
-        frame->width == 0 || frame->height == 0 ||
+    if (!frame || frame->width == 0 || frame->height == 0 ||
         (frame->width & 1u) || (frame->height & 1u))
         return -EINVAL;
-    if (frame->flags & V4L2_BUF_FLAG_ERROR)
-        return -EIO;
 
-    surface = venus_backend_find_surface(
-        backend, (VASurfaceID)frame->tag);
-    if (!surface)
-        return -ENOENT;
+    surface_id = VENUS_SURFACE_BASE | (VASurfaceID)(frame->tag & 0xffu);
+    surface = venus_backend_find_surface(backend, surface_id);
+    if (!surface || surface->decode_tag != frame->tag)
+        return 0;
+
+    if (frame->flags & V4L2_BUF_FLAG_ERROR) {
+        surface->ready = true;
+        return 0;
+    }
+
     if (surface->width > frame->width ||
         surface->height > frame->height)
         return -EINVAL;
@@ -179,7 +185,7 @@ static VAStatus backend_create_context(
                                       ? 8u * 1024u * 1024u
                                       : 2u * 1024u * 1024u,
             .output_buffers = 4,
-            .capture_buffers = 16,
+            .capture_buffers = 20,
         };
 
         status = venus_v4l2_decoder_open(
@@ -201,6 +207,7 @@ static VAStatus backend_create_context(
     context->backend = backend;
     context->height = (unsigned int)picture_height;
     context->target = VA_INVALID_ID;
+    context->decode_sequence = 1;
     context->encode_delivery_sequence = 1;
 
     for (index = 0; index < (unsigned int)num_render_targets; index++) {
@@ -327,6 +334,7 @@ static VAStatus backend_begin_picture(VADriverContextP driver_context,
     if (config->entrypoint == VAEntrypointVLD) {
         surface->ready = false;
         surface->data_size = 0;
+        surface->decode_tag = 0;
     }
 
     pthread_mutex_unlock(&backend->mutex);
@@ -535,7 +543,7 @@ static int collect_hevc_buffers(
 static int collect_vpx_frame(
     struct venus_backend *backend, struct venus_context *context,
     VAProfile profile, const uint8_t **data, size_t *size,
-    uint8_t **owned_data)
+    uint8_t **owned_data, bool *wait_for_frame)
 {
     const VAPictureParameterBufferVP8 *vp8_picture = NULL;
     const VADecPictureParameterBufferVP9 *vp9_picture = NULL;
@@ -546,6 +554,7 @@ static int collect_vpx_frame(
     *data = NULL;
     *size = 0;
     *owned_data = NULL;
+    *wait_for_frame = true;
     for (index = 0; index < context->pending_count; index++) {
         const struct venus_buffer *buffer = venus_backend_find_buffer(
             backend, context->pending[index]);
@@ -666,6 +675,7 @@ static int collect_vpx_frame(
             return -EINVAL;
         if (((*data)[0] & 0xf0u) != 0x80u)
             return -ENOTSUP;
+        *wait_for_frame = vp9_picture->pic_fields.bits.show_frame != 0;
     }
 
     return 0;
@@ -684,11 +694,14 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
         venus_backend_from_context(driver_context);
     struct venus_context *context;
     struct venus_config *config;
+    struct venus_surface *target_surface = NULL;
     uint8_t *access_unit = NULL;
     size_t access_unit_capacity;
     size_t access_unit_size = 0;
     size_t num_batches;
     size_t num_hevc_slices;
+    uint64_t decode_tag = 0;
+    bool wait_for_frame = true;
     int status;
 
     if (!backend)
@@ -722,6 +735,15 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
         goto finish;
     }
 
+    target_surface = venus_backend_find_surface(backend, context->target);
+    if (!target_surface) {
+        status = -EINVAL;
+        goto finish;
+    }
+    decode_tag = (context->decode_sequence++ << 8) |
+                 (uint64_t)(context->target & 0xffu);
+    target_surface->decode_tag = decode_tag;
+
     if (config->profile == VAProfileVP8Version0_3 ||
         config->profile == VAProfileVP9Profile0) {
         const uint8_t *frame;
@@ -729,12 +751,12 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
         status = collect_vpx_frame(backend, context,
                                    config->profile, &frame,
                                    &access_unit_size,
-                                   &access_unit);
+                                   &access_unit, &wait_for_frame);
         if (status < 0)
             goto finish;
         status = venus_v4l2_decoder_submit(
             context->decoder, frame, access_unit_size,
-            context->target, venus_decode_store_frame_locked, backend);
+            decode_tag, venus_decode_store_frame_locked, backend);
     } else if (config->profile == VAProfileHEVCMain ||
                config->profile == VAProfileHEVCMain10) {
         status = collect_hevc_buffers(
@@ -750,7 +772,7 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
             goto finish;
         status = venus_v4l2_decoder_submit(
             context->decoder, access_unit, access_unit_size,
-            context->target, venus_decode_store_frame_locked, backend);
+            decode_tag, venus_decode_store_frame_locked, backend);
         if (status == 0) {
             venus_hevc_state_free(context->hevc_state);
             context->hevc_state = next_hevc_state;
@@ -777,7 +799,19 @@ static VAStatus backend_end_picture(VADriverContextP driver_context,
 
         status = venus_v4l2_decoder_submit(
             context->decoder, access_unit, access_unit_size,
-            context->target, venus_decode_store_frame_locked, backend);
+            decode_tag, venus_decode_store_frame_locked, backend);
+    }
+
+    /*
+     * Complete the decoded CPU->DMABUF copy before vaEndPicture returns.
+     * Chromium's VaapiVideoDecoder reuses already-exported DMA-BUF surfaces
+     * and hands them directly to Viz GL after vaEndPicture without calling
+     * vaSyncSurface (expecting a kernel GPU fence). With DISPLAY_DELAY=0,
+     * Venus emits the decoded frame in ~1-3ms.
+     */
+    if (status == 0 && !target_surface->ready) {
+        (void)venus_decode_sync_surface_locked(
+            backend, target_surface, wait_for_frame ? 250 : 15);
     }
 
 finish:
@@ -791,9 +825,9 @@ finish:
                       : VA_STATUS_SUCCESS;
 }
 
-static VAStatus sync_surface_locked(struct venus_backend *backend,
-                                    struct venus_surface *surface,
-                                    int timeout_ms)
+VAStatus venus_decode_sync_surface_locked(struct venus_backend *backend,
+                                          struct venus_surface *surface,
+                                          int timeout_ms)
 {
     struct venus_context *context;
     int64_t deadline;
@@ -810,10 +844,16 @@ static VAStatus sync_surface_locked(struct venus_backend *backend,
         return VA_STATUS_ERROR_INVALID_CONTEXT;
 
     deadline = monotonic_milliseconds() + timeout_ms;
-    while (!surface->ready &&
-           monotonic_milliseconds() < deadline) {
-        int status = venus_v4l2_decoder_pump(
-            context->decoder, 1000,
+    while (!surface->ready) {
+        int64_t remaining = deadline - monotonic_milliseconds();
+        int step_ms;
+        int status;
+
+        if (remaining <= 0)
+            break;
+        step_ms = remaining > 50 ? 50 : (int)remaining;
+        status = venus_v4l2_decoder_pump(
+            context->decoder, step_ms,
             venus_decode_store_frame_locked, backend, NULL);
 
         if (status == -ETIMEDOUT || status == -EAGAIN)
@@ -844,7 +884,7 @@ static VAStatus backend_sync_surface(VADriverContextP driver_context,
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    status = sync_surface_locked(
+    status = venus_decode_sync_surface_locked(
         backend, surface, VENUS_SYNC_TIMEOUT_MS);
     pthread_mutex_unlock(&backend->mutex);
     return status;
@@ -876,7 +916,7 @@ static VAStatus backend_sync_surface2(
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
 
-    status = sync_surface_locked(
+    status = venus_decode_sync_surface_locked(
         backend, surface, (int)timeout_ms);
     pthread_mutex_unlock(&backend->mutex);
     return status;

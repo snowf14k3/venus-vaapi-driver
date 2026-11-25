@@ -282,6 +282,10 @@ static void stream_off(struct venus_v4l2_decoder *decoder,
 
 static int setup_capture(struct venus_v4l2_decoder *decoder)
 {
+    struct v4l2_control min_buffers = {
+        .id = V4L2_CID_MIN_BUFFERS_FOR_CAPTURE,
+    };
+    unsigned int desired_buffers;
     unsigned int index;
     int status;
 
@@ -292,9 +296,20 @@ static int setup_capture(struct venus_v4l2_decoder *decoder)
     if (status < 0)
         return status;
 
+    desired_buffers = decoder->requested_capture_buffers;
+    if (xioctl(decoder->fd, VIDIOC_G_CTRL, &min_buffers) == 0 &&
+        min_buffers.value > 0) {
+        unsigned int needed = (unsigned int)min_buffers.value + 2u;
+
+        if (needed > desired_buffers)
+            desired_buffers = needed;
+    }
+    if (desired_buffers > 32u)
+        desired_buffers = 32u;
+
     status = request_and_map(
         decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-        decoder->requested_capture_buffers, &decoder->capture,
+        desired_buffers, &decoder->capture,
         &decoder->capture_count);
     if (status < 0)
         return status;
@@ -392,21 +407,31 @@ int venus_v4l2_decoder_open(
     if (status < 0)
         goto fail;
 
-    if (decoder->coded_format == V4L2_PIX_FMT_HEVC) {
+    /*
+     * Request decode-order zero-delay output so stateful Venus does not
+     * hold B-frames in an internal reorder queue behind VA-API's own DPB.
+     */
+    {
         struct v4l2_control delay = {
             .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY,
             .value = 0,
         };
+        bool required = (decoder->coded_format == V4L2_PIX_FMT_HEVC);
 
         if (xioctl(decoder->fd, VIDIOC_S_CTRL, &delay) < 0) {
-            status = decoder_error(decoder, "S_CTRL(DISPLAY_DELAY)");
-            goto fail;
-        }
-        delay.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
-        delay.value = 1;
-        if (xioctl(decoder->fd, VIDIOC_S_CTRL, &delay) < 0) {
-            status = decoder_error(decoder, "S_CTRL(DISPLAY_DELAY_ENABLE)");
-            goto fail;
+            if (required) {
+                status = decoder_error(decoder, "S_CTRL(DISPLAY_DELAY)");
+                goto fail;
+            }
+        } else {
+            delay.id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
+            delay.value = 1;
+            if (xioctl(decoder->fd, VIDIOC_S_CTRL, &delay) < 0 &&
+                required) {
+                status = decoder_error(
+                    decoder, "S_CTRL(DISPLAY_DELAY_ENABLE)");
+                goto fail;
+            }
         }
     }
 
@@ -507,19 +532,22 @@ static int dequeue_capture(struct venus_v4l2_decoder *decoder,
                 decoder->capture_format.plane_fmt[0].bytesperline,
         };
 
-        if (frame.size > 0 && callback) {
+        status = 0;
+        if (frame.size > 0 && callback)
             status = callback(&frame, opaque);
-            if (status < 0)
-                return status;
-        }
 
         if (buffer.flags & V4L2_BUF_FLAG_LAST) {
             if (end_of_stream)
                 *end_of_stream = true;
-            return 0;
+            return status < 0 ? status : 0;
         }
 
-        status = queue_capture(decoder, buffer.index);
+        {
+            int qstatus = queue_capture(decoder, buffer.index);
+
+            if (qstatus < 0)
+                return qstatus;
+        }
         if (status < 0)
             return status;
     }
@@ -548,32 +576,15 @@ static int dequeue_events(struct venus_v4l2_decoder *decoder,
             int status;
 
             decoder->source_changes++;
-            if (!decoder->capture_streaming) {
-                status = setup_capture(decoder);
-                if (status < 0)
-                    return status;
-            } else {
-                struct v4l2_format format = {
-                    .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-                };
-
-                if (xioctl(decoder->fd, VIDIOC_G_FMT, &format) < 0)
-                    return decoder_error(
-                        decoder,
-                        "VIDIOC_G_FMT(CAPTURE source-change)");
-
-                if (format.fmt.pix_mp.pixelformat !=
-                        decoder->requested_raw_format ||
-                    format.fmt.pix_mp.num_planes != 1 ||
-                    format.fmt.pix_mp.plane_fmt[0].sizeimage >
-                        decoder->capture[0].length) {
-                    errno = EOVERFLOW;
-                    return decoder_error(
-                        decoder, "dynamic capture format");
-                }
-
-                decoder->capture_format = format.fmt.pix_mp;
+            if (decoder->capture_streaming) {
+                stream_off(decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+                decoder->capture_streaming = false;
+                release_buffers(decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                                &decoder->capture, &decoder->capture_count);
             }
+            status = setup_capture(decoder);
+            if (status < 0)
+                return status;
         }
     }
 }
@@ -584,7 +595,9 @@ int venus_v4l2_decoder_pump(struct venus_v4l2_decoder *decoder,
                             void *opaque, bool *end_of_stream)
 {
     struct pollfd poll_fd;
+    bool all_output_queued = true;
     bool made_progress = false;
+    unsigned int index;
     int status;
 
     if (!decoder || decoder->fd < 0 || timeout_ms < 0)
@@ -593,9 +606,22 @@ int venus_v4l2_decoder_pump(struct venus_v4l2_decoder *decoder,
     if (end_of_stream)
         *end_of_stream = false;
 
+    /*
+     * Only poll POLLOUT when every OUTPUT slot is queued; otherwise vb2
+     * signals POLLOUT immediately and causes a 100% CPU busy-spin while
+     * waiting for a CAPTURE frame.
+     */
+    for (index = 0; index < decoder->output_count; index++) {
+        if (!decoder->output[index].queued) {
+            all_output_queued = false;
+            break;
+        }
+    }
+
     poll_fd = (struct pollfd) {
         .fd = decoder->fd,
-        .events = POLLIN | POLLOUT | POLLPRI,
+        .events = (short)(POLLIN | POLLPRI |
+                          (all_output_queued ? POLLOUT : 0)),
     };
 
     do {

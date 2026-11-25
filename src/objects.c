@@ -130,6 +130,29 @@ static void release_surface(struct venus_surface *surface)
     memset(surface, 0, sizeof(*surface));
 }
 
+static void fill_surface_black(uint8_t *data, size_t uv_offset,
+                               size_t capacity, uint32_t fourcc)
+{
+    if (!data || uv_offset > capacity)
+        return;
+
+    if (fourcc == VA_FOURCC_P010) {
+        uint16_t *samples = (uint16_t *)data;
+        size_t y_count = uv_offset / sizeof(uint16_t);
+        size_t total_count = capacity / sizeof(uint16_t);
+        size_t i;
+
+        for (i = 0; i < y_count; i++)
+            samples[i] = 0x1000u;
+        for (i = y_count; i < total_count; i++)
+            samples[i] = 0x8000u;
+    } else {
+        /* NV12 video black is Y=16, U=128, V=128 (0x00 renders bright green). */
+        memset(data, 0x10, uv_offset);
+        memset(data + uv_offset, 0x80, capacity - uv_offset);
+    }
+}
+
 static int allocate_dma_surface(struct venus_surface *surface,
                                 unsigned int width,
                                 unsigned int height,
@@ -196,7 +219,7 @@ static int allocate_dma_surface(struct venus_surface *surface,
         close(dma_fd);
         return -saved_errno;
     }
-    memset(surface->data, 0, allocation_size);
+    fill_surface_black(surface->data, uv_offset, allocation_size, fourcc);
     sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE;
     if (xioctl(dma_fd, DMA_BUF_IOCTL_SYNC, &sync) < 0) {
         saved_errno = errno;
@@ -385,7 +408,6 @@ int venus_surface_copy_from_yuv420(
     if (status < 0)
         return status;
 
-    memset(surface->data, 0, surface->capacity);
     for (row = 0; row < height; row++)
         memcpy(surface->data +
                    (size_t)row * destination_stride,
@@ -648,6 +670,8 @@ static VAStatus create_surfaces_locked(
             surface->scanlines = height;
             surface->uv_offset =
                 (size_t)surface->stride * height;
+            fill_surface_black(surface->data, surface->uv_offset,
+                               surface->capacity, fourcc);
         }
 
         surface->used = true;
@@ -1231,6 +1255,12 @@ static VAStatus backend_derive_image(VADriverContextP context,
         return VA_STATUS_ERROR_INVALID_SURFACE;
     }
     if (!surface->ready) {
+        if (!surface->encode_pending &&
+            surface->context_id != VA_INVALID_ID)
+            (void)venus_decode_sync_surface_locked(
+                backend, surface, 250);
+    }
+    if (!surface->ready) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_SURFACE_BUSY;
     }
@@ -1303,6 +1333,12 @@ static VAStatus backend_get_image(
     if (surface->fourcc != image->fourcc) {
         pthread_mutex_unlock(&backend->mutex);
         return VA_STATUS_ERROR_INVALID_IMAGE_FORMAT;
+    }
+    if (!surface->ready) {
+        if (!surface->encode_pending &&
+            surface->context_id != VA_INVALID_ID)
+            (void)venus_decode_sync_surface_locked(
+                backend, surface, 250);
     }
     if (!surface->ready) {
         pthread_mutex_unlock(&backend->mutex);
@@ -1417,6 +1453,10 @@ static VAStatus backend_export_surface_handle(
         return !surface ? VA_STATUS_ERROR_INVALID_SURFACE
                         : VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
     }
+
+    if (!surface->ready && !surface->encode_pending &&
+        surface->context_id != VA_INVALID_ID)
+        (void)venus_decode_sync_surface_locked(backend, surface, 250);
 
     exported_fd =
         fcntl(surface->dma_fd, F_DUPFD_CLOEXEC, 0);
