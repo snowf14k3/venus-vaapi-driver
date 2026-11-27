@@ -131,7 +131,7 @@ static int append_sps(struct byte_writer *output, VAProfile profile,
     venus_bits_init(&bits, rbsp, sizeof(rbsp));
     venus_bits_write(&bits, (uint32_t)profile_value, 8);
     venus_bits_write(&bits, constraint_flags(profile_value), 8);
-    venus_bits_write(&bits, 41, 8);
+    venus_bits_write(&bits, 51, 8);
     venus_bits_write_ue(&bits, 0);
 
     if (profile_value == 100) {

@@ -14,11 +14,11 @@
 #include <va/va_enc_h264.h>
 #include <va/va_enc_hevc.h>
 
-#define VENUS_MAX_CONFIGS 16
-#define VENUS_MAX_CONTEXTS 8
-#define VENUS_MAX_SURFACES 64
-#define VENUS_MAX_BUFFERS 512
-#define VENUS_MAX_IMAGES 128
+#define VENUS_MAX_CONFIGS 32
+#define VENUS_MAX_CONTEXTS 16
+#define VENUS_MAX_SURFACES 192
+#define VENUS_MAX_BUFFERS 1024
+#define VENUS_MAX_IMAGES 256
 #define VENUS_MAX_PENDING_BUFFERS 128
 
 #define VENUS_CONFIG_BASE 0x01000000u
@@ -69,6 +69,7 @@ struct venus_surface {
     bool gpu_native;
     bool ready;
     bool encode_pending;
+    uint64_t decode_tag;
     VABufferID coded_buffer_id;
     VAContextID context_id;
 };
@@ -131,6 +132,7 @@ struct venus_context {
     size_t encode_queue_count;
     uint32_t encode_frames_per_second;
     uint32_t encode_vp8_profile;
+    uint64_t decode_sequence;
     uint64_t encode_sequence;
     uint64_t encode_delivery_sequence;
 };
@@ -204,6 +206,9 @@ void venus_decode_fill_vtable(struct VADriverVTable *vtable);
 void venus_decode_destroy_all(struct venus_backend *backend);
 int venus_decode_store_frame_locked(
     const struct venus_v4l2_frame *frame, void *opaque);
+VAStatus venus_decode_sync_surface_locked(
+    struct venus_backend *backend, struct venus_surface *surface,
+    int timeout_ms);
 
 VAStatus venus_encode_end_picture_locked(
     struct venus_backend *backend, struct venus_context *context,
