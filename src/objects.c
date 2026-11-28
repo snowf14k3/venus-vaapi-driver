@@ -551,7 +551,7 @@ static struct venus_buffer *allocate_buffer(
     return NULL;
 }
 
-static bool valid_surface_attributes(
+static VAStatus valid_surface_attributes(
     VASurfaceAttrib *attributes, unsigned int num_attributes,
     uint32_t *fourcc, bool *exportable)
 {
@@ -565,18 +565,18 @@ static bool valid_surface_attributes(
             if (attribute->value.type != VAGenericValueTypeInteger ||
                 !surface_bytes_per_sample(
                     (uint32_t)attribute->value.value.i))
-                return false;
+                return VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT;
             *fourcc = (uint32_t)attribute->value.value.i;
         } else if (attribute->type == VASurfaceAttribMemoryType) {
             int memory_type;
 
             if (attribute->value.type != VAGenericValueTypeInteger)
-                return false;
+                return VA_STATUS_ERROR_INVALID_PARAMETER;
             memory_type = attribute->value.value.i;
             if (!(memory_type &
                   (VA_SURFACE_ATTRIB_MEM_TYPE_VA |
                    VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2)))
-                return false;
+                return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
             if (memory_type &
                 VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2)
                 *exportable = true;
@@ -584,17 +584,17 @@ static bool valid_surface_attributes(
                    VASurfaceAttribUsageHint) {
             if (attribute->value.type !=
                 VAGenericValueTypeInteger)
-                return false;
+                return VA_STATUS_ERROR_INVALID_PARAMETER;
             if (attribute->value.value.i &
                 VA_SURFACE_ATTRIB_USAGE_HINT_EXPORT)
                 *exportable = true;
         } else if (attribute->flags &
                    VA_SURFACE_ATTRIB_SETTABLE) {
-            return false;
+            return VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
         }
     }
 
-    return true;
+    return VA_STATUS_SUCCESS;
 }
 
 static VAStatus create_surfaces_locked(
@@ -606,6 +606,7 @@ static VAStatus create_surfaces_locked(
     struct venus_surface *created[VENUS_MAX_SURFACES];
     size_t capacity;
     uint32_t fourcc;
+    VAStatus status;
     bool exportable;
     unsigned int free_slots = 0;
     unsigned int created_count = 0;
@@ -624,10 +625,10 @@ static VAStatus create_surfaces_locked(
         return VA_STATUS_ERROR_INVALID_PARAMETER;
     if (num_attributes > 0 && !attributes)
         return VA_STATUS_ERROR_INVALID_PARAMETER;
-    if (!valid_surface_attributes(
-            attributes, num_attributes, &fourcc,
-            &exportable))
-        return VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE;
+    status = valid_surface_attributes(attributes, num_attributes, &fourcc,
+                                      &exportable);
+    if (status != VA_STATUS_SUCCESS)
+        return status;
     if ((fourcc == VA_FOURCC_NV12 &&
          !(format & VA_RT_FORMAT_YUV420)) ||
         (fourcc == VA_FOURCC_P010 &&
